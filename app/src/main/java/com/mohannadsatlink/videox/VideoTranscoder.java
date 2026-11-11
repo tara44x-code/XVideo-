@@ -36,6 +36,10 @@ final class VideoTranscoder {
         boolean smartQuality = true;
         /** Copy the source audio track with MediaMuxer. Off when FFmpeg adds the audio afterwards. */
         boolean muxAudio = true;
+        /** Resolution as a percentage of the source (profiles); 0 = use shortEdge/preset. */
+        int scalePercent;
+        /** Use variable bitrate even with an explicit bitrate (better quality per byte). */
+        boolean preferVbr;
     }
 
     /** Minimum bits per pixel per frame for a clean picture (hardware encoders). */
@@ -71,7 +75,7 @@ final class VideoTranscoder {
 
             Preset preset = options.preset;
             int maxLong = preset == Preset.LOW ? 854 : preset == Preset.MEDIUM ? 1280 : 1920;
-            float scale = options.shortEdge>0?Math.min(1f,options.shortEdge/(float)Math.min(srcW,srcH)):Math.min(1f, maxLong / (float)Math.max(srcW, srcH));
+            float scale = options.scalePercent>0?1f:options.shortEdge>0?Math.min(1f,options.shortEdge/(float)Math.min(srcW,srcH)):Math.min(1f, maxLong / (float)Math.max(srcW, srcH));
             int outW = even(Math.round(srcW * scale)), outH = even(Math.round(srcH * scale));
             if (!"الأصلي".equals(options.aspect)) {
                 float ratio = "1:1".equals(options.aspect) ? 1f : "9:16".equals(options.aspect) ? 9f/16f : 16f/9f;
@@ -111,15 +115,20 @@ final class VideoTranscoder {
             }
 
             // Quality guard: too few bits for this many pixels gives blocky video. Trading some
-            // resolution (and then frame rate) for bits looks much cleaner at the same file size.
-            if (options.smartQuality && options.videoBitrate <= 0 && "الأصلي".equals(options.aspect)) {
+            // resolution for bits looks much cleaner at the same file size. The frame rate is never
+            // touched automatically: dropping frames makes motion look jerky.
+            if (options.scalePercent > 0 && options.scalePercent < 100 && "الأصلي".equals(options.aspect)) {
+                float pct = options.scalePercent / 100f;
+                outW = even(Math.round(outW * pct));
+                outH = even(Math.round(outH * pct));
+            }
+            if (options.smartQuality && options.videoBitrate <= 0 && options.scalePercent <= 0 && "الأصلي".equals(options.aspect)) {
                 double minBpp = efficientCodec ? MIN_BPP_HEVC : MIN_BPP_AVC;
                 while (bitrate / ((double) outW * outH * outputFps) < minBpp && Math.min(outW, outH) > 480) {
                     float shrink = Math.max(480f / Math.min(outW, outH), 0.75f);
                     outW = even(Math.round(outW * shrink));
                     outH = even(Math.round(outH * shrink));
                 }
-                if (bitrate / ((double) outW * outH * outputFps) < minBpp && options.frameRate <= 0 && outputFps > 24) outputFps = 24;
             }
 
             MediaCodecInfo.CodecProfileLevel best = null;
@@ -128,7 +137,7 @@ final class VideoTranscoder {
             try {
                 MediaCodecInfo.CodecCapabilities caps = encoder.getCodecInfo().getCapabilitiesForType(outputMime);
                 MediaCodecInfo.EncoderCapabilities capabilities = caps.getEncoderCapabilities();
-                if ((options.targetBytes > 0 || options.videoBitrate > 0) && capabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR))
+                if ((options.targetBytes > 0 || (options.videoBitrate > 0 && !options.preferVbr)) && capabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR))
                     bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
                 else if (capabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR))
                     bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR;
@@ -151,7 +160,14 @@ final class VideoTranscoder {
             encoder.start();
 
             decoder = MediaCodec.createDecoderByType(mime);
-            decoder.configure(in, codecSurface.decoderSurface(), null, 0);
+            try {
+                in.setInteger(MediaFormat.KEY_PRIORITY, 0);
+                in.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE);
+                decoder.configure(in, codecSurface.decoderSurface(), null, 0);
+            } catch (Exception rateRejected) {
+                decoder.reset();
+                decoder.configure(extractor.getTrackFormat(videoTrack), codecSurface.decoderSurface(), null, 0);
+            }
             decoder.start();
 
             int muxerType = profile.startsWith("WEBM") ? MediaMuxer.OutputFormat.MUXER_OUTPUT_WEBM
@@ -188,57 +204,72 @@ final class VideoTranscoder {
             boolean inputDone = false, decoderDone = false, encoderDone = false;
             int videoOutTrack = -1;
             long rangeUs = Math.max(1, endUs - startUs), lastProgress = -1;
-            long nextFrameUs=0, frameIntervalUs=(options.frameRate>0||outputFps<sourceFps-1)?1_000_000L/Math.max(1,outputFps):0;
+            // Only drop frames when the user asked for a lower frame rate. Frames are picked on a
+            // fixed time grid so motion stays even (e.g. 60 -> 30 keeps every 2nd frame).
+            long frameIntervalUs = options.frameRate > 0 && options.frameRate < sourceFps - 1 ? 1_000_000L / options.frameRate : 0;
+            long nextFrameUs = 0;
+            final long timeoutUs = 2_500;
 
             while (!encoderDone) {
                 if (cancelled.get()) throw new InterruptedException("تم إلغاء العملية");
 
-                int encStatus = encoder.dequeueOutputBuffer(encInfo, 10_000);
-                if (encStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
-                    if (muxerStarted) throw new IllegalStateException("تغير تنسيق الإخراج مرتين");
-                    videoOutTrack = muxer.addTrack(encoder.getOutputFormat());
-                    muxer.start(); muxerStarted = true;
-                } else if (encStatus >= 0) {
-                    ByteBuffer data = encoder.getOutputBuffer(encStatus);
-                    if ((encInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) encInfo.size = 0;
-                    if (encInfo.size > 0) {
-                        if (!muxerStarted) throw new IllegalStateException("لم يبدأ ملف الإخراج");
-                        data.position(encInfo.offset); data.limit(encInfo.offset + encInfo.size);
-                        muxer.writeSampleData(videoOutTrack, data, encInfo);
+                // 1) Feed the decoder with every free input buffer (no waiting).
+                while (!inputDone) {
+                    int index = decoder.dequeueInputBuffer(0);
+                    if (index < 0) break;
+                    ByteBuffer buffer = decoder.getInputBuffer(index);
+                    int size = buffer == null ? -1 : extractor.readSampleData(buffer, 0);
+                    long pts = extractor.getSampleTime();
+                    if (size < 0 || pts < 0 || pts > endUs) {
+                        decoder.queueInputBuffer(index, 0, 0, Math.max(startUs, endUs), MediaCodec.BUFFER_FLAG_END_OF_STREAM);
+                        inputDone = true;
+                    } else {
+                        decoder.queueInputBuffer(index, 0, size, pts, extractor.getSampleFlags());
+                        extractor.advance();
                     }
-                    encoderDone = (encInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
-                    encoder.releaseOutputBuffer(encStatus, false);
                 }
 
-                if (!inputDone) {
-                    int index = decoder.dequeueInputBuffer(10_000);
-                    if (index >= 0) {
-                        ByteBuffer buffer = decoder.getInputBuffer(index);
-                        int size = extractor.readSampleData(buffer, 0);
-                        long pts = extractor.getSampleTime();
-                        if (size < 0 || pts < 0 || pts > endUs) {
-                            decoder.queueInputBuffer(index, 0, 0, Math.max(startUs, endUs), MediaCodec.BUFFER_FLAG_END_OF_STREAM);
-                            inputDone = true;
-                        } else {
-                            decoder.queueInputBuffer(index, 0, size, pts, extractor.getSampleFlags());
-                            extractor.advance();
+                // 2) Drain everything the encoder has ready. Only wait once the decoder is finished.
+                while (true) {
+                    int encStatus = encoder.dequeueOutputBuffer(encInfo, decoderDone ? timeoutUs : 0);
+                    if (encStatus == MediaCodec.INFO_TRY_AGAIN_LATER) break;
+                    if (encStatus == MediaCodec.INFO_OUTPUT_FORMAT_CHANGED) {
+                        if (muxerStarted) throw new IllegalStateException("تغير تنسيق الإخراج مرتين");
+                        videoOutTrack = muxer.addTrack(encoder.getOutputFormat());
+                        muxer.start(); muxerStarted = true;
+                    } else if (encStatus >= 0) {
+                        ByteBuffer data = encoder.getOutputBuffer(encStatus);
+                        if ((encInfo.flags & MediaCodec.BUFFER_FLAG_CODEC_CONFIG) != 0) encInfo.size = 0;
+                        if (encInfo.size > 0 && data != null) {
+                            if (!muxerStarted) throw new IllegalStateException("لم يبدأ ملف الإخراج");
+                            data.position(encInfo.offset); data.limit(encInfo.offset + encInfo.size);
+                            muxer.writeSampleData(videoOutTrack, data, encInfo);
                         }
+                        encoderDone = (encInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
+                        encoder.releaseOutputBuffer(encStatus, false);
+                        if (encoderDone) break;
                     }
+                    if (cancelled.get()) throw new InterruptedException("تم إلغاء العملية");
                 }
+                if (encoderDone) break;
 
+                // 3) Take one decoded frame and render it into the encoder.
                 if (!decoderDone) {
-                    int decStatus = decoder.dequeueOutputBuffer(decInfo, 10_000);
+                    int decStatus = decoder.dequeueOutputBuffer(decInfo, timeoutUs);
                     if (decStatus >= 0) {
                         boolean eos = (decInfo.flags & MediaCodec.BUFFER_FLAG_END_OF_STREAM) != 0;
                         boolean render = decInfo.size > 0 && decInfo.presentationTimeUs >= startUs && decInfo.presentationTimeUs <= endUs;
                         long adjusted = Math.max(0, decInfo.presentationTimeUs - startUs);
-                        if(render&&frameIntervalUs>0){if(adjusted+1000<nextFrameUs)render=false;else nextFrameUs=adjusted+frameIntervalUs;}
+                        if (render && frameIntervalUs > 0) {
+                            if (adjusted + 1000 < nextFrameUs) render = false;
+                            else while (nextFrameUs <= adjusted + 1000) nextFrameUs += frameIntervalUs;
+                        }
                         decoder.releaseOutputBuffer(decStatus, render);
                         if (render) {
                             codecSurface.awaitAndDraw();
                             codecSurface.setPresentationTime(adjusted * 1000);
                             codecSurface.swap();
-                            int p = (int)Math.min(94, adjusted * 94 / rangeUs);
+                            int p = (int) Math.min(94, adjusted * 94 / rangeUs);
                             if (p != lastProgress) { lastProgress = p; listener.onProgress(p); }
                         }
                         if (eos) { decoderDone = true; encoder.signalEndOfInputStream(); }
@@ -314,6 +345,29 @@ final class VideoTranscoder {
             try { ex.release(); } catch (Exception ignored) {}
         }
     }
+    /** False when Android has no decoder for this file's video (RMVB/RM, FLV, WMV…): use FFmpeg instead. */
+    static boolean canDecode(Context context, Uri uri) {
+        MediaExtractor ex = new MediaExtractor();
+        try {
+            try (AssetFileDescriptor afd = context.getContentResolver().openAssetFileDescriptor(uri, "r")) {
+                if (afd == null) return false;
+                if (afd.getDeclaredLength() < 0) ex.setDataSource(afd.getFileDescriptor());
+                else ex.setDataSource(afd.getFileDescriptor(), afd.getStartOffset(), afd.getDeclaredLength());
+            }
+            for (int i = 0; i < ex.getTrackCount(); i++) {
+                MediaFormat f = ex.getTrackFormat(i);
+                String mime = f.getString(MediaFormat.KEY_MIME);
+                if (mime == null || !mime.startsWith("video/")) continue;
+                return new android.media.MediaCodecList(android.media.MediaCodecList.REGULAR_CODECS).findDecoderForFormat(f) != null;
+            }
+            return false;
+        } catch (Exception e) {
+            return false;
+        } finally {
+            try { ex.release(); } catch (Exception ignored) {}
+        }
+    }
+
     private static MediaFormat videoFormat(String mime, int w, int h, int bitrate, int fps, int bitrateMode, MediaCodecInfo.CodecProfileLevel profile) {
         MediaFormat out = MediaFormat.createVideoFormat(mime, w, h);
         out.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
@@ -321,6 +375,11 @@ final class VideoTranscoder {
         out.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
         out.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
         if (bitrateMode >= 0) out.setInteger(MediaFormat.KEY_BITRATE_MODE, bitrateMode);
+        if (profile != null) {
+            // Ask the hardware to run as fast as it can (we are not recording in real time).
+            out.setInteger(MediaFormat.KEY_PRIORITY, 0);
+            out.setInteger(MediaFormat.KEY_OPERATING_RATE, Short.MAX_VALUE);
+        }
         if (profile != null) {
             out.setInteger(MediaFormat.KEY_PROFILE, profile.profile);
             out.setInteger(MediaFormat.KEY_LEVEL, profile.level);

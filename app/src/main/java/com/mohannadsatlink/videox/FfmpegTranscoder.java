@@ -67,7 +67,7 @@ final class FfmpegTranscoder {
     }
 
     void convertAudio(Uri input,File output,String format,int bitrateKbps,int sampleRate,long startMs,long endMs,float gain,Listener listener)throws Exception{
-        String source="file".equals(input.getScheme())?input.getPath():FFmpegKitConfig.getSafParameterForRead(context,input);ArrayList<String> args=new ArrayList<>();args.add("-y");args.add("-i");args.add(source);args.add("-ss");args.add(String.format(java.util.Locale.US,"%.3f",startMs/1000d));args.add("-to");args.add(String.format(java.util.Locale.US,"%.3f",endMs/1000d));args.add("-vn");args.add("-af");args.add(String.format(java.util.Locale.US,"volume=%.2f",gain));if(sampleRate>0){args.add("-ar");args.add(String.valueOf(sampleRate));}args.add("-b:a");args.add(bitrateKbps+"k");if("AAC".equals(format)){args.add("-c:a");args.add("aac");args.add("-f");args.add("adts");}else if("M4A".equals(format)){args.add("-c:a");args.add("aac");args.add("-f");args.add("mp4");}else{args.add("-c:a");args.add("libvorbis");args.add("-f");args.add("ogg");}args.add(output.getAbsolutePath());execute(args,output,Math.max(1,endMs-startMs),listener);
+        String source="file".equals(input.getScheme())?input.getPath():FFmpegKitConfig.getSafParameterForRead(context,input);ArrayList<String> args=new ArrayList<>();args.add("-y");args.add("-i");args.add(source);args.add("-ss");args.add(String.format(java.util.Locale.US,"%.3f",startMs/1000d));args.add("-to");args.add(String.format(java.util.Locale.US,"%.3f",endMs/1000d));args.add("-vn");args.add("-af");args.add(String.format(java.util.Locale.US,"volume=%.2f",gain));if(sampleRate>0){args.add("-ar");args.add(String.valueOf(sampleRate));}args.add("-b:a");args.add(bitrateKbps+"k");if("MP3".equals(format)){args.add("-c:a");args.add("libmp3lame");args.add("-f");args.add("mp3");}else if("AAC".equals(format)){args.add("-c:a");args.add("aac");args.add("-f");args.add("adts");}else if("M4A".equals(format)){args.add("-c:a");args.add("aac");args.add("-f");args.add("mp4");}else{args.add("-c:a");args.add("libvorbis");args.add("-f");args.add("ogg");}args.add(output.getAbsolutePath());execute(args,output,Math.max(1,endMs-startMs),listener);
     }
 
     void studioEdit(Uri input,File output,long startMs,long endMs,int rotation,boolean mirror,float speed,int visual,int audioMode,boolean stripMetadata,Listener listener)throws Exception{
@@ -183,6 +183,51 @@ final class FfmpegTranscoder {
         listener.onProgress(100);
     }
 
+    /**
+     * Full FFmpeg transcode for sources Android cannot decode itself (RMVB/RM, FLV, WMV, old AVI…).
+     * Decoding is done by FFmpeg; encoding still uses the phone's hardware encoder when possible.
+     */
+    void transcodeLegacy(Uri input, File output, String format, long startMs, long endMs, int width, int height,
+                         int videoBitrate, int frameRate, boolean keepAudio, int audioKbps, long durationMs, Listener listener) throws Exception {
+        String f = format == null ? "MP4_AVC" : format;
+        ArrayList<String> args = new ArrayList<>();
+        args.add("-y");
+        if (startMs > 0) { args.add("-ss"); args.add(seconds(startMs)); }
+        if (endMs > startMs) { args.add("-t"); args.add(seconds(endMs - startMs)); }
+        args.add("-i"); args.add(source(input));
+        args.add("-map"); args.add("0:v:0");
+        if (keepAudio) { args.add("-map"); args.add("0:a:0?"); }
+        args.add("-vf"); args.add("scale=" + even(width) + ":" + even(height) + ",setsar=1,format=yuv420p");
+        if (frameRate > 0) { args.add("-r"); args.add(String.valueOf(frameRate)); }
+        int codecAt = args.size();
+        String first = f.endsWith("HEVC") ? "hevc_mediacodec" : "h264_mediacodec";
+        boolean webm = f.startsWith("WEBM"), avi = "FFMPEG_AVI".equals(f);
+        if (webm) { args.add("-c:v"); args.add("libvpx"); args.add("-b:v"); args.add(String.valueOf(videoBitrate)); args.add("-deadline"); args.add("realtime"); args.add("-cpu-used"); args.add("8"); }
+        else if (avi) { args.add("-c:v"); args.add("mpeg4"); args.add("-q:v"); args.add("4"); }
+        else { args.add("-c:v"); args.add(first); args.add("-b:v"); args.add(String.valueOf(videoBitrate)); }
+        if (keepAudio) {
+            args.add("-c:a"); args.add(webm ? "libopus" : avi ? "libmp3lame" : "aac");
+            args.add("-b:a"); args.add(Math.max(64, audioKbps) + "k");
+            if (!webm) { args.add("-ac"); args.add("2"); }
+        } else args.add("-an");
+        String container = webm ? "webm" : f.startsWith("3GP") ? "3gp" : "FFMPEG_MKV".equals(f) ? "matroska"
+                : "FFMPEG_MOV".equals(f) ? "mov" : avi ? "avi" : "mp4";
+        if ("mp4".equals(container) || "mov".equals(container)) {
+            args.add("-movflags"); args.add("+faststart");
+            if (f.endsWith("HEVC")) { args.add("-tag:v"); args.add("hvc1"); }
+        }
+        args.add("-f"); args.add(container);
+        args.add(output.getAbsolutePath());
+        long outMs = Math.max(1, endMs > startMs ? endMs - startMs : durationMs);
+        if (webm || avi) {
+            try { runPass(args, outMs, listener, "فشل تحويل الملف"); }
+            catch (Exception e) { if (output.exists()) output.delete(); throw e; }
+        } else {
+            runWithFallbackEncoders(args, codecAt, videoBitrate, output, outMs, listener, "فشل تحويل الملف", first);
+        }
+        listener.onProgress(100);
+    }
+
     /** Copies streams into another container without re-encoding (instant, no quality loss). */
     void remux(Uri input, File output, String container, long startMs, long endMs, long durationMs, Listener listener) throws Exception {
         ArrayList<String> args = new ArrayList<>();
@@ -206,8 +251,18 @@ final class FfmpegTranscoder {
 
     private void runWithFallbackEncoders(ArrayList<String> args, int codecAt, int bitrate, File output, long durationMs,
                                          Listener listener, String errorPrefix) throws Exception {
-        // Some phones reject FFmpeg's MediaCodec H.264 encoder; fall back to OpenH264, then MPEG-4 Part 2.
-        String[][] encoders = {{"h264_mediacodec", "-b:v", String.valueOf(bitrate)}, {"libopenh264", "-b:v", String.valueOf(bitrate)}, {"mpeg4", "-q:v", "3"}};
+        runWithFallbackEncoders(args, codecAt, bitrate, output, durationMs, listener, errorPrefix, "h264_mediacodec");
+    }
+
+    private void runWithFallbackEncoders(ArrayList<String> args, int codecAt, int bitrate, File output, long durationMs,
+                                         Listener listener, String errorPrefix, String firstEncoder) throws Exception {
+        // Some phones reject FFmpeg's MediaCodec encoders; fall back to H.264 hardware, OpenH264, then MPEG-4 Part 2.
+        ArrayList<String[]> chain = new ArrayList<>();
+        chain.add(new String[]{firstEncoder, "-b:v", String.valueOf(bitrate)});
+        if (!"h264_mediacodec".equals(firstEncoder)) chain.add(new String[]{"h264_mediacodec", "-b:v", String.valueOf(bitrate)});
+        chain.add(new String[]{"libopenh264", "-b:v", String.valueOf(bitrate)});
+        chain.add(new String[]{"mpeg4", "-q:v", "3"});
+        String[][] encoders = chain.toArray(new String[0][]);
         Exception last = null;
         for (String[] encoder : encoders) {
             ArrayList<String> attempt = new ArrayList<>(args);

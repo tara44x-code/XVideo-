@@ -129,21 +129,30 @@ public final class ProcessingService extends Service {
             o.frameRate = intent.getIntExtra("frameRate", 0);
             o.audioBitrate = intent.getIntExtra("audioBitrate", 128) * 1000;
             o.smartQuality = intent.getBooleanExtra("smart", true);
+            o.scalePercent = intent.getIntExtra("scalePercent", 0);
+            o.preferVbr = intent.getBooleanExtra("vbr", false);
             int audioBitrate = intent.getIntExtra("audioBitrate", 128);
             int audioSampleRate = intent.getIntExtra("audioSampleRate", 0);
             long duration = o.endMs > o.startMs ? o.endMs - o.startMs : new VideoInfo(this, source).durationMs;
             String requested = o.outputFormat;
+            boolean legacy = (requested == null || !requested.startsWith("REMUX_")) && !VideoTranscoder.canDecode(this, source);
 
             if (requested != null && requested.startsWith("REMUX_")) {
                 // Change container only: no re-encoding, so quality is identical and it takes seconds.
                 String container = requested.endsWith("MKV") ? "matroska" : requested.endsWith("MOV") ? "mov" : "mp4";
                 new FfmpegTranscoder(this, cancelled).remux(source, destination, container, o.startMs, o.endMs, duration, this::progress);
+            } else if ("AUDIO_MP3".equals(requested) && legacy) {
+                long end = o.endMs > o.startMs ? o.endMs : o.startMs + duration;
+                new FfmpegTranscoder(this, cancelled).convertAudio(source, destination, "MP3", audioBitrate, audioSampleRate, o.startMs, end, 1f, this::progress);
             } else if ("AUDIO_MP3".equals(requested)) {
                 // Built-in LAME encoder: works on every CPU, including 32-bit phones.
                 new Mp3Transcoder(this, cancelled).convert(source, destination, audioBitrate, audioSampleRate, o.startMs, o.endMs, 1f, this::progress);
             } else if (requested != null && requested.startsWith("AUDIO_")) {
                 long end = o.endMs > o.startMs ? o.endMs : o.startMs + duration;
                 new FfmpegTranscoder(this, cancelled).convertAudio(source, destination, "M4A", audioBitrate, audioSampleRate, o.startMs, end, 1f, this::progress);
+            } else if (legacy) {
+                // RMVB / FLV / WMV …: FFmpeg decodes, the hardware encoder still does the heavy work.
+                transcodeLegacy(source, destination, o, audioBitrate, duration, this::progress);
             } else if (o.keepAudio || (requested != null && requested.startsWith("FFMPEG"))) {
                 temp = encodeWithSourceAudio(source, destination, o, audioBitrate, audioSampleRate, duration, 0, 100);
             } else {
@@ -194,6 +203,36 @@ public final class ProcessingService extends Service {
         return temp;
     }
 
+    /** Picks output size/bitrate like {@link VideoTranscoder} does, then lets FFmpeg do the whole job. */
+    private void transcodeLegacy(Uri source, File destination, VideoTranscoder.Options o, int audioKbps, long durationMs,
+                                 FfmpegTranscoder.Listener listener) throws Exception {
+        VideoInfo vi = new VideoInfo(this, source);
+        int srcW = Math.max(16, vi.width), srcH = Math.max(16, vi.height);
+        float scale;
+        if (o.scalePercent > 0) scale = Math.min(1f, o.scalePercent / 100f);
+        else if (o.shortEdge > 0) scale = Math.min(1f, o.shortEdge / (float) Math.min(srcW, srcH));
+        else {
+            int maxLong = o.preset == VideoTranscoder.Preset.LOW ? 854 : o.preset == VideoTranscoder.Preset.MEDIUM ? 1280 : 1920;
+            scale = Math.min(1f, maxLong / (float) Math.max(srcW, srcH));
+        }
+        int w = Math.max(2, Math.round(srcW * scale) & ~1), h = Math.max(2, Math.round(srcH * scale) & ~1);
+        String f = o.outputFormat == null ? "MP4_AVC" : o.outputFormat;
+        long lengthMs = o.endMs > o.startMs ? o.endMs - o.startMs : durationMs;
+        int bitrate;
+        if (o.videoBitrate > 0) bitrate = o.videoBitrate;
+        else if (o.targetBytes > 0) {
+            long seconds = Math.max(1, lengthMs / 1000);
+            bitrate = (int) Math.max(150_000, Math.min(20_000_000, o.targetBytes * 8 / seconds * 96 / 100 - (o.keepAudio ? audioKbps * 1000L : 0)));
+        } else {
+            double bpp = o.preset == VideoTranscoder.Preset.LOW ? 0.05 : o.preset == VideoTranscoder.Preset.MEDIUM ? 0.075 : 0.11;
+            if (f.endsWith("HEVC") || f.endsWith("VP9")) bpp *= 0.65;
+            double fps = o.frameRate > 0 ? o.frameRate : vi.frameRate > 1 ? Math.min(60, vi.frameRate) : 30;
+            bitrate = (int) Math.max(250_000, (double) w * h * fps * bpp);
+        }
+        new FfmpegTranscoder(this, cancelled).transcodeLegacy(source, destination, f, o.startMs, o.endMs, w, h, bitrate,
+                o.frameRate, o.keepAudio, audioKbps, durationMs, listener);
+    }
+
     /** Renders the clips arranged in {@link EditorActivity}. */
     private void runTimeline(Intent intent, File destination) throws Exception {
         String[] uris = intent.getStringArrayExtra("uris");
@@ -242,9 +281,13 @@ public final class ProcessingService extends Service {
                 o.audioBitrate = 128_000;
                 Uri src = Uri.parse(inputs[index]);
                 long duration = new VideoInfo(this, src).durationMs;
-                File tmp = encodeWithSourceAudio(src, current, o, 128, 0, duration,
-                        index * 100 / inputs.length, (index + 1) * 100 / inputs.length);
-                if (tmp != null) tmp.delete();
+                int from = index * 100 / inputs.length, to = (index + 1) * 100 / inputs.length;
+                if (!VideoTranscoder.canDecode(this, src)) {
+                    transcodeLegacy(src, current, o, 128, duration, p -> progress(from + (to - from) * p / 100));
+                } else {
+                    File tmp = encodeWithSourceAudio(src, current, o, 128, 0, duration, from, to);
+                    if (tmp != null) tmp.delete();
+                }
                 results.add(current.getAbsolutePath());
                 current = null;
             }

@@ -7,6 +7,12 @@ import android.media.MediaMetadataRetriever;
 import android.net.Uri;
 import android.provider.OpenableColumns;
 
+import com.arthenica.ffmpegkit.FFmpegKitConfig;
+import com.arthenica.ffmpegkit.FFprobeKit;
+import com.arthenica.ffmpegkit.MediaInformation;
+import com.arthenica.ffmpegkit.MediaInformationSession;
+import com.arthenica.ffmpegkit.StreamInformation;
+
 import java.util.Locale;
 
 final class VideoInfo {
@@ -31,6 +37,7 @@ final class VideoInfo {
                 if (si >= 0 && !c.isNull(si)) size = c.getLong(si);
             }
         }
+        boolean ok = false;
         MediaMetadataRetriever r = new MediaMetadataRetriever();
         try {
             r.setDataSource(context, uri);
@@ -42,7 +49,46 @@ final class VideoInfo {
             String detected=r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE); if(detected!=null)mime=detected;
             int rotation = (int) parse(r.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_ROTATION));
             if (rotation == 90 || rotation == 270) { int t = width; width = height; height = t; }
-        } finally { r.release(); }
+            ok = durationMs > 0 && width > 0;
+        } catch (Exception androidCannotRead) {
+            ok = false;
+        } finally { try { r.release(); } catch (Exception ignored) {} }
+        if (!ok) probeWithFfmpeg(context, uri);
+    }
+
+    /** True when Android's own decoders could not read the file and FFmpeg must handle it (RMVB, FLV, WMV…). */
+    boolean legacy;
+
+    private void probeWithFfmpeg(Context context, Uri uri) throws Exception {
+        String path = "file".equals(uri.getScheme()) ? uri.getPath() : FFmpegKitConfig.getSafParameterForRead(context, uri);
+        MediaInformationSession session = FFprobeKit.getMediaInformation(path);
+        MediaInformation media = session == null ? null : session.getMediaInformation();
+        if (media == null) throw new IllegalArgumentException("صيغة الملف غير مدعومة");
+        durationMs = Math.round(parseDouble(media.getDuration()) * 1000);
+        bitrateKbps = (int) (parse(media.getBitrate()) / 1000);
+        String format = media.getFormat();
+        mime = format == null ? "video" : format.split(",")[0];
+        boolean hasVideo = false;
+        if (media.getStreams() != null) for (StreamInformation stream : media.getStreams()) {
+            if (!"video".equals(stream.getType()) || hasVideo) continue;
+            hasVideo = true;
+            width = stream.getWidth() == null ? 0 : stream.getWidth().intValue();
+            height = stream.getHeight() == null ? 0 : stream.getHeight().intValue();
+            frameRate = (float) fraction(stream.getAverageFrameRate());
+        }
+        if (!hasVideo || durationMs <= 0) throw new IllegalArgumentException("الملف لا يحتوي على فيديو صالح");
+        legacy = true;
+    }
+
+    private static double parseDouble(String v) { try { return v == null ? 0 : Double.parseDouble(v.trim()); } catch (Exception e) { return 0; } }
+
+    private static double fraction(String v) {
+        if (v == null) return 0;
+        try {
+            String[] p = v.split("/");
+            if (p.length == 2) { double d = Double.parseDouble(p[1]); return d == 0 ? 0 : Double.parseDouble(p[0]) / d; }
+            return Double.parseDouble(v);
+        } catch (Exception e) { return 0; }
     }
 
     private static long parse(String value) {

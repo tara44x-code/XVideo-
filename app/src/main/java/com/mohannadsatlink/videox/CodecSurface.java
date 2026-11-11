@@ -9,6 +9,8 @@ import android.opengl.EGLExt;
 import android.opengl.EGLSurface;
 import android.opengl.GLES11Ext;
 import android.opengl.GLES20;
+import android.os.Handler;
+import android.os.HandlerThread;
 import android.view.Surface;
 
 import java.nio.ByteBuffer;
@@ -29,6 +31,7 @@ final class CodecSurface implements SurfaceTexture.OnFrameAvailableListener {
     private final FloatBuffer vertices;
 
     private final int outputWidth, outputHeight;
+    private final HandlerThread callbackThread = new HandlerThread("VideoX-frames");
 
     CodecSurface(Surface encoderInput, int outputWidth, int outputHeight, int sourceWidth, int sourceHeight) {
         this.outputWidth = outputWidth;
@@ -95,7 +98,8 @@ final class CodecSurface implements SurfaceTexture.OnFrameAvailableListener {
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_S, GLES20.GL_CLAMP_TO_EDGE);
         GLES20.glTexParameteri(GLES11Ext.GL_TEXTURE_EXTERNAL_OES, GLES20.GL_TEXTURE_WRAP_T, GLES20.GL_CLAMP_TO_EDGE);
         texture = new SurfaceTexture(textureId);
-        texture.setOnFrameAvailableListener(this);
+        callbackThread.start();
+        texture.setOnFrameAvailableListener(this, new Handler(callbackThread.getLooper()));
         decoderSurface = new Surface(texture);
     }
 
@@ -141,6 +145,7 @@ final class CodecSurface implements SurfaceTexture.OnFrameAvailableListener {
             EGL14.eglDestroySurface(display, eglSurface); EGL14.eglDestroyContext(display, context); EGL14.eglReleaseThread(); EGL14.eglTerminate(display);
         }
         decoderSurface.release(); texture.release();
+        callbackThread.quitSafely();
     }
 
     private static void fail(String message) { throw new RuntimeException(message); }
