@@ -62,22 +62,27 @@ jobs:
           name: VideoX-release-apk
           path: app/build/outputs/apk/release/*.apk
 
-      # On a tag (e.g. v5.2): attach the APKs to a GitHub Release so they can be
+      # On every push to main (and on v* tags): attach the APKs to a GitHub Release so they can be
       # downloaded directly from the phone (Releases page, no login needed).
       - name: Prepare release files
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
         run: |
+          VERSION="v$(sed -n "s/^[[:space:]]*versionName '\(.*\)'/\1/p" app/build.gradle | head -1)"
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
           mkdir -p out
-          cp app/build/outputs/apk/debug/*.apk "out/VideoX-Compressor-Pro-${GITHUB_REF_NAME}-test.apk"
+          cp app/build/outputs/apk/debug/*.apk "out/VideoX-Compressor-Pro-${VERSION}-test.apk"
           if [ "$HAS_KEYSTORE" = "true" ]; then
-            cp app/build/outputs/apk/release/*.apk "out/VideoX-Compressor-Pro-${GITHUB_REF_NAME}.apk"
+            cp app/build/outputs/apk/release/*.apk "out/VideoX-Compressor-Pro-${VERSION}.apk"
           fi
 
       - name: Publish GitHub release
-        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        if: ${{ github.event_name == 'push' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')) }}
         uses: softprops/action-gh-release@v2
         with:
-          name: VideoX Compressor Pro ${{ github.ref_name }}
+          tag_name: ${{ env.VERSION }}
+          target_commitish: ${{ github.sha }}
+          name: VideoX Compressor Pro ${{ env.VERSION }}
+          overwrite_files: true
           body: |
             - `*-test.apk`: نسخة تجريبية تنزل جنب النسخة الأصلية بدون ما تمسحها.
             - راجع CHANGELOG.md لتفاصيل التغييرات.
