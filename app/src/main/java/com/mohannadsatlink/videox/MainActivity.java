@@ -80,7 +80,7 @@ public final class MainActivity extends Activity {
     private boolean editorPlayerReady;
     private Runnable playerTicker;
     private volatile int editorGeneration;
-    private final BroadcastReceiver statusReceiver=new BroadcastReceiver(){@Override public void onReceive(Context context,Intent intent){String state=intent.getStringExtra("state");int p=intent.getIntExtra("progress",0);if("running".equals(state))updateProgress(p);else if("done".equals(state)){ArrayList<String> paths=ProcessingService.completedPaths;String path=ProcessingService.completedPath;long original=ProcessingService.completedOriginalSize;ProcessingService.completedPaths=null;ProcessingService.completedPath=null;serviceJob=false;if(paths!=null&&!paths.isEmpty())showBatchResult(paths);else if(path!=null)showResult(new File(path),original);}else if("error".equals(state)||"cancelled".equals(state)){serviceJob=false;toast("error".equals(state)?intent.getStringExtra("error"):"تم إلغاء العملية");if("دفعة".equals(pendingMode))showHome();else if("تحرير".equals(pendingMode))showStudioEditPageSafely();else showEditorSafely();}}};
+    private final BroadcastReceiver statusReceiver=new BroadcastReceiver(){@Override public void onReceive(Context context,Intent intent){String state=intent.getStringExtra("state");int p=intent.getIntExtra("progress",0);if("running".equals(state))updateProgress(p);else if("done".equals(state)){ArrayList<String> paths=ProcessingService.completedPaths;String path=ProcessingService.completedPath;long original=ProcessingService.completedOriginalSize;ProcessingService.completedPaths=null;ProcessingService.completedPath=null;serviceJob=false;if(paths!=null&&!paths.isEmpty())showBatchResult(paths);else if(path!=null)showResult(new File(path),original);}else if("error".equals(state)||"cancelled".equals(state)){serviceJob=false;toast("error".equals(state)?intent.getStringExtra("error"):"تم إلغاء العملية");if("دفعة".equals(pendingMode)||"محرر".equals(pendingMode))showHome();else if("تحرير".equals(pendingMode))showStudioEditPageSafely();else showEditorSafely();}}};
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -89,6 +89,7 @@ public final class MainActivity extends Activity {
         root = new FrameLayout(this); root.setBackgroundColor(BG); setContentView(root);
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS)!=PackageManager.PERMISSION_GRANTED)requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS},501);
         Uri incoming = incomingUri(getIntent());
+        if(handleEditorIntent(getIntent()))return;
         if(ProcessingService.running){serviceJob=true;showProgress(ProcessingService.currentLabel);updateProgress(ProcessingService.currentProgress);}
         else if (incoming != null) loadVideo(incoming, "ضغط"); else showHome();
     }
@@ -97,7 +98,7 @@ public final class MainActivity extends Activity {
     @Override protected void onStop(){if(receiverRegistered){unregisterReceiver(statusReceiver);receiverRegistered=false;}super.onStop();}
 
     @Override protected void onNewIntent(Intent intent) {
-        super.onNewIntent(intent); Uri incoming = incomingUri(intent); if (incoming != null) loadVideo(incoming, "ضغط");
+        super.onNewIntent(intent); if (handleEditorIntent(intent)) return; Uri incoming = incomingUri(intent); if (incoming != null) loadVideo(incoming, "ضغط");
     }
 
     private Uri incomingUri(Intent i) {
@@ -129,25 +130,47 @@ public final class MainActivity extends Activity {
         sub.setGravity(Gravity.CENTER); page.addView(sub);
         page.addView(space(14));
 
+        View compressTool = tool("◫", "ضغط وتحويل", "حجم أصغر بجودة عالية • MP4 • MKV • MP3", v -> pick(false,"ضغط"));
+        page.addView(compressTool, match()); page.addView(space(12));
         LinearLayout tools1 = row();
-        tools1.addView(tool("◫", "ضغط الفيديو", "الحجم • الدقة • الفريمات", v -> pick(false,"ضغط")), weight());
-        tools1.addView(tool("✂", "قص الفيديو", "شريط قص مرئي ودقيق", v -> pick(false,"قص")), weightMargin());
+        tools1.addView(tool("✂", "محرر الفيديو", "قص • حذف جزء • دمج • سرعة", v -> openEditor(false)), weight());
+        tools1.addView(tool("♫", "محرر الصوت", "قص ودمج MP3 • تحويل فيديو لصوت", v -> openEditor(true)), weightMargin());
         page.addView(tools1); page.addView(space(12));
         LinearLayout tools2 = row();
-        tools2.addView(tool("↻", "تحويل الفيديو", "MP4 • 3GP • WebM", v -> pick(false,"تحويل")), weight());
-        tools2.addView(tool("▣", "دمج الفيديوهات", "ترتيب وتوحيد المقاطع", v -> pick(true,"دمج")), weightMargin());
-        page.addView(tools2); page.addView(space(12));
-        View audioTool = tool("♫", "تحويل الصوت Pro", "MP3 • WAV • AAC • M4A • OGG", v -> pick(false,"صوت"));
-        page.addView(audioTool, match()); page.addView(space(16));
-        View batchTool = tool("≡", "معالجة دفعة Pro", "ضغط عدة فيديوهات بالتتابع", v -> pick(true,"دفعة"));
-        page.addView(batchTool, match()); page.addView(space(16));
-
-        View studioTool = tool("✦", "أدوات تعديل Pro", "تدوير • سرعة • تحسين • خصوصية", v -> pick(false,"تحرير"));
-        page.addView(studioTool, match()); page.addView(space(16));
+        tools2.addView(tool("≡", "معالجة دفعة", "ضغط عدة فيديوهات", v -> pick(true,"دفعة")), weight());
+        tools2.addView(tool("✦", "أدوات Pro", "تدوير • تحسين • خصوصية", v -> pick(false,"تحرير")), weightMargin());
+        page.addView(tools2); page.addView(space(16));
 
         Button history = secondary("سجل الملفات"); history.setOnClickListener(v -> { homeScreen=false; showHistory(); }); page.addView(history, match());
         Button settings = secondary("الإعدادات ومعلومات التطبيق"); settings.setOnClickListener(v -> { homeScreen=false; showSettings(); }); page.addView(settings, matchTop(10));
         setPage(page);
+    }
+
+    private void openEditor(boolean audio) {
+        if (ProcessingService.running) { toast("انتظر حتى تنتهي العملية الحالية"); return; }
+        startActivity(new Intent(this, EditorActivity.class).putExtra(EditorActivity.EXTRA_AUDIO, audio));
+    }
+
+    /** Results/progress handed over from {@link EditorActivity}. */
+    private boolean handleEditorIntent(Intent intent) {
+        if (intent == null) return false;
+        String result = intent.getStringExtra("resultPath");
+        if (result != null) {
+            intent.removeExtra("resultPath");
+            serviceJob = false;
+            ProcessingService.completedPath = null;
+            showResult(new File(result), 0);
+            return true;
+        }
+        if (intent.getBooleanExtra("showRunning", false)) {
+            intent.removeExtra("showRunning");
+            if (ProcessingService.running) {
+                serviceJob = true; pendingMode = "محرر";
+                showProgress(ProcessingService.currentLabel); updateProgress(ProcessingService.currentProgress);
+                return true;
+            }
+        }
+        return false;
     }
 
     private View tool(String glyph, String title, String subtitle, View.OnClickListener click) {
@@ -291,13 +314,13 @@ public final class MainActivity extends Activity {
         homeScreen = false; processing = false;
         boolean trimMode = "قص".equals(pendingMode);
         boolean convertMode = "تحويل".equals(pendingMode);
-        String editorTitle = trimMode ? "قص الفيديو" : convertMode ? "تحويل الفيديو" : "ضغط الفيديو";
+        String editorTitle = trimMode ? "قص الفيديو" : convertMode ? "تحويل الفيديو" : "ضغط وتحويل";
         LinearLayout page = page(); page.addView(titleBar(editorTitle, this::showHome)); page.addView(space(10));
         FrameLayout previewFrame = new FrameLayout(this);
         previewFrame.setBackgroundColor(Color.BLACK);
         TextureView preview = new TextureView(this); preview.setOpaque(true);
         previewFrame.addView(preview, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        page.addView(previewFrame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(205)));
+        page.addView(previewFrame, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, previewHeight()));
         TextView previewStatus=label("جاري تجهيز معاينة الفيديو…",13,Color.rgb(151,170,205),false);previewStatus.setGravity(Gravity.CENTER);page.addView(previewStatus,matchTop(5));
 
         LinearLayout playerCard=card(); TextView playTime=label("00:00 / "+VideoInfo.time(info.durationMs),14,Color.WHITE,true);playTime.setGravity(Gravity.CENTER);playerCard.addView(playTime);
@@ -333,8 +356,8 @@ public final class MainActivity extends Activity {
 
         CheckBox audio=new CheckBox(this); audio.setText("الاحتفاظ بالصوت الأصلي"); audio.setTextColor(Color.WHITE); audio.setChecked(true); audio.setButtonTintList(android.content.res.ColorStateList.valueOf(BLUE)); page.addView(audio,matchTop(12));
         TextView advancedSection=section(trimMode?"إعدادات القص":"إعدادات احترافية");page.addView(advancedSection);
-        String[] formatNames={"MP4 — H.264 (توافق أعلى)","MP4 — H.265 (حجم أقل)","3GP — H.264","WebM — VP8","WebM — VP9","MKV — حاوية Matroska حقيقية","MOV — QuickTime حقيقي","AVI — MPEG-4/MP3 حقيقي"};
-        String[] formatValues={"MP4_AVC","MP4_HEVC","3GP_AVC","WEBM_VP8","WEBM_VP9","FFMPEG_MKV","FFMPEG_MOV","FFMPEG_AVI"};
+        String[] formatNames={"MP4 — H.264 (يشتغل بكل مكان)","MP4 — H.265 (أصغر حجماً)","3GP — H.264","WebM — VP8","WebM — VP9","MKV — Matroska","MOV — QuickTime","AVI — MPEG-4/MP3","MP4 — بدون إعادة ضغط (سريع، نفس الجودة)","MKV — بدون إعادة ضغط (سريع، نفس الجودة)","MOV — بدون إعادة ضغط (سريع، نفس الجودة)","صوت فقط — MP3","صوت فقط — M4A (AAC)"};
+        String[] formatValues={"MP4_AVC","MP4_HEVC","3GP_AVC","WEBM_VP8","WEBM_VP9","FFMPEG_MKV","FFMPEG_MOV","FFMPEG_AVI","REMUX_MP4","REMUX_MKV","REMUX_MOV","AUDIO_MP3","AUDIO_M4A"};
         Spinner outputFormat=styledSpinner(formatNames);page.addView(outputFormat);
         TextView targetLabel=label("الحجم الذكي المستهدف",15,Color.WHITE,true);page.addView(targetLabel,matchTop(12));
         EditText targetMb=new EditText(this);targetMb.setHint("اكتب الحجم المطلوب بالميغابايت — اختياري");targetMb.setHintTextColor(Color.GRAY);targetMb.setTextColor(Color.WHITE);targetMb.setInputType(android.text.InputType.TYPE_CLASS_NUMBER|android.text.InputType.TYPE_NUMBER_FLAG_DECIMAL);targetMb.setBackground(round(CARD,14,Color.rgb(48,72,110)));targetMb.setPadding(dp(14),dp(12),dp(14),dp(12));page.addView(targetMb,matchTop(7));
@@ -345,16 +368,29 @@ public final class MainActivity extends Activity {
         String[] fpsNames={"الفريمات: الأصلية","15 FPS","24 FPS","25 FPS","30 FPS","50 FPS","60 FPS","90 FPS","120 FPS"};int[] fpsValues={0,15,24,25,30,50,60,90,120};Spinner fps=styledSpinner(fpsNames);page.addView(fps,matchTop(10));
         String[] videoAudioBitrateNames={"جودة الصوت: 64 kbps","جودة الصوت: 96 kbps","جودة الصوت: 128 kbps","جودة الصوت: 192 kbps","جودة الصوت: 256 kbps","جودة الصوت: 320 kbps"};int[] videoAudioBitrateValues={64,96,128,192,256,320};Spinner videoAudioBitrate=styledSpinner(videoAudioBitrateNames);videoAudioBitrate.setSelection(2);page.addView(videoAudioBitrate,matchTop(10));
         String[] videoSampleNames={"معدل عينة الصوت: الأصلي","32000 Hz","44100 Hz","48000 Hz"};int[] videoSampleValues={0,32000,44100,48000};Spinner videoSampleRate=styledSpinner(videoSampleNames);page.addView(videoSampleRate,matchTop(10));
-        profiles.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onItemSelected(android.widget.AdapterView<?>a,View v,int position,long id){if(position==1){resolution.setSelection(4);videoBitrate.setSelection(4);fps.setSelection(4);}else if(position==2){resolution.setSelection(5);videoBitrate.setSelection(6);fps.setSelection(4);}else if(position==3){resolution.setSelection(5);videoBitrate.setSelection(8);fps.setSelection(6);}}public void onNothingSelected(android.widget.AdapterView<?>a){}});
+        profiles.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onItemSelected(android.widget.AdapterView<?>a,View v,int position,long id){if(position==1){resolution.setSelection(4);videoBitrate.setSelection(4);fps.setSelection(4);outputFormat.setSelection(0);}else if(position==2){resolution.setSelection(5);videoBitrate.setSelection(6);fps.setSelection(4);}else if(position==3){resolution.setSelection(5);videoBitrate.setSelection(8);fps.setSelection(6);}}public void onNothingSelected(android.widget.AdapterView<?>a){}});
         Button savePreset=secondary("حفظ الإعدادات الحالية كقالب Pro");savePreset.setOnClickListener(v->{getPreferences(MODE_PRIVATE).edit().putInt("pro_resolution",resolution.getSelectedItemPosition()).putInt("pro_bitrate",videoBitrate.getSelectedItemPosition()).putInt("pro_fps",fps.getSelectedItemPosition()).putInt("pro_format",outputFormat.getSelectedItemPosition()).putInt("pro_audio_bitrate",videoAudioBitrate.getSelectedItemPosition()).putInt("pro_audio_rate",videoSampleRate.getSelectedItemPosition()).apply();toast("تم حفظ قالب Pro");});page.addView(savePreset,matchTop(10));
         int savedResolution=getPreferences(MODE_PRIVATE).getInt("pro_resolution",-1);if(savedResolution>=0){resolution.setSelection(Math.min(savedResolution,resolutionNames.length-1));videoBitrate.setSelection(Math.min(getPreferences(MODE_PRIVATE).getInt("pro_bitrate",0),bitrateNames.length-1));fps.setSelection(Math.min(getPreferences(MODE_PRIVATE).getInt("pro_fps",0),fpsNames.length-1));outputFormat.setSelection(Math.min(getPreferences(MODE_PRIVATE).getInt("pro_format",0),formatNames.length-1));videoAudioBitrate.setSelection(Math.min(getPreferences(MODE_PRIVATE).getInt("pro_audio_bitrate",2),videoAudioBitrateNames.length-1));videoSampleRate.setSelection(Math.min(getPreferences(MODE_PRIVATE).getInt("pro_audio_rate",0),videoSampleNames.length-1));}
+        if(savedResolution<0&&!convertMode&&!trimMode&&supportsEncoder(MediaFormat.MIMETYPE_VIDEO_HEVC))outputFormat.setSelection(1);
+        CheckBox smart=new CheckBox(this);smart.setText("تحسين ذكي: يخفض الدقة تلقائياً بدل ظهور تكسّر بالصورة");smart.setTextColor(Color.WHITE);smart.setChecked(getPreferences(MODE_PRIVATE).getBoolean("smart_quality",true));smart.setButtonTintList(android.content.res.ColorStateList.valueOf(BLUE));smart.setOnCheckedChangeListener((b,on)->getPreferences(MODE_PRIVATE).edit().putBoolean("smart_quality",on).apply());if(!trimMode)page.addView(smart,matchTop(10));
         Spinner aspect=new Spinner(this);String[] aspects={"الأصلي","16:9","9:16","1:1"};ArrayAdapter<String> aspectAdapter=new ArrayAdapter<String>(this,android.R.layout.simple_spinner_dropdown_item,aspects);aspect.setAdapter(aspectAdapter);aspect.setBackground(round(CARD,14,Color.rgb(48,72,110)));page.addView(aspect,matchTop(10));
         TextView formatNote=label("الصيغ حقيقية مع اختيار الترميز، وليست تغييراً لامتداد الملف.",12,Color.rgb(151,170,205),false);page.addView(formatNote,matchTop(8));
         TextView estimate=label("الحجم المتوقع: " + estimate(chosen[0],info.durationMs),14,Color.rgb(94,205,137),true); estimate.setGravity(Gravity.CENTER); page.addView(estimate,matchTop(8));
         Button calculate=secondary("حساب Pro للحجم والجودة");calculate.setOnClickListener(v->{long duration=Math.max(1,(long)(info.durationMs*(trimBar.getEnd()-trimBar.getStart())));Double targetValue=parseTargetMb(targetMb);if(targetValue!=null&&(Double.isNaN(targetValue)||targetValue<=0)){toast("اكتب حجماً صحيحاً أكبر من صفر");return;}if(targetValue!=null){long bytes=(long)(targetValue*1024*1024);long videoRate=Math.max(0,bytes*8_000/duration-128_000);String warning=info.size>0&&bytes>=info.size?"  ⚠ اختر حجماً أصغر من الأصلي":videoRate<250_000?"  ⚠ الحجم صغير جداً لهذه المدة":"";estimate.setText("المستهدف: "+VideoInfo.bytes(bytes)+"  •  Video ≈ "+(videoRate/1000)+" kbps"+warning);}else{int kb=bitrateValues[videoBitrate.getSelectedItemPosition()];long rate=kb>0?(kb+128L)*1000:(chosen[0]==VideoTranscoder.Preset.LOW?828_000:chosen[0]==VideoTranscoder.Preset.MEDIUM?1_628_000:3_128_000);long expected=rate*duration/8000;estimate.setText("الحجم المتوقع: "+VideoInfo.bytes(expected)+(info.size>0&&expected>=info.size?"  ⚠ قد يصبح أكبر من الأصلي":""));}});page.addView(calculate,matchTop(8));
         for(int i=0;i<pbs.length;i++){int x=i;pbs[i].setOnClickListener(v->{chosen[0]=pv[x];for(int j=0;j<pbs.length;j++)styleChip(pbs[j],j==x);if(!convertMode&&info.size>0){double ratio=x==0?.35:x==1?.55:.75;targetMb.setText(String.format(Locale.US,"%.1f",info.size*ratio/1024d/1024d));resolution.setSelection(x==0?4:x==1?5:0);fps.setSelection(x==0?2:0);estimate.setText("الحجم المستهدف: "+VideoInfo.bytes((long)(info.size*ratio))+"  •  توفير تقريبي "+Math.round((1-ratio)*100)+"%");}else estimate.setText("الحجم المتوقع: "+estimate(chosen[0],info.durationMs));});}
+        if(!trimMode){
+            // Advanced settings are folded away so the screen stays simple.
+            View[] advanced={profiles,resolution,videoBitrate,fps,videoAudioBitrate,videoSampleRate,savePreset,aspect,formatNote,calculate};
+            Button more=secondary("إعدادات متقدمة ▾");
+            boolean open=getPreferences(MODE_PRIVATE).getBoolean("advanced_open",false);
+            for(View view:advanced)view.setVisibility(open?View.VISIBLE:View.GONE);
+            more.setText(open?"إخفاء الإعدادات المتقدمة ▴":"إعدادات متقدمة ▾");
+            more.setOnClickListener(v->{boolean show=advanced[0].getVisibility()!=View.VISIBLE;for(View view:advanced)view.setVisibility(show?View.VISIBLE:View.GONE);more.setText(show?"إخفاء الإعدادات المتقدمة ▴":"إعدادات متقدمة ▾");getPreferences(MODE_PRIVATE).edit().putBoolean("advanced_open",show).apply();});
+            page.addView(more,page.indexOfChild(profiles),matchTop(10));
+            outputFormat.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onItemSelected(android.widget.AdapterView<?>a,View v,int position,long id){String value=formatValues[position];boolean copyOnly=value.startsWith("REMUX_")||value.startsWith("AUDIO_");presets.setAlpha(copyOnly?.4f:1f);targetMb.setEnabled(!copyOnly);targetChips.setAlpha(copyOnly?.4f:1f);smart.setEnabled(!copyOnly);if(value.startsWith("REMUX_"))estimate.setText("تغيير الصيغة فقط: نفس الجودة ونفس الحجم تقريباً، ويخلص بثواني");else if(value.startsWith("AUDIO_"))estimate.setText("سيتم استخراج الصوت فقط بالجودة المختارة بالإعدادات المتقدمة");}public void onNothingSelected(android.widget.AdapterView<?>a){}});
+        }
         if(trimMode){advancedSection.setVisibility(View.GONE);outputFormat.setVisibility(View.GONE);targetLabel.setVisibility(View.GONE);targetMb.setVisibility(View.GONE);targetChips.setVisibility(View.GONE);profiles.setVisibility(View.GONE);resolution.setVisibility(View.GONE);videoBitrate.setVisibility(View.GONE);fps.setVisibility(View.GONE);videoAudioBitrate.setVisibility(View.GONE);videoSampleRate.setVisibility(View.GONE);savePreset.setVisibility(View.GONE);aspect.setVisibility(View.GONE);formatNote.setVisibility(View.GONE);estimate.setVisibility(View.GONE);calculate.setVisibility(View.GONE);}
-        Button go=action(trimMode?"✂ بدء القص":convertMode?"↻ بدء التحويل":"◫ بدء الضغط Pro",VIOLET); go.setOnClickListener(v->{long a=(long)(info.durationMs*trimBar.getStart()),b=(long)(info.durationMs*trimBar.getEnd());long target=0;Double targetValue=parseTargetMb(targetMb);if(targetValue!=null&&(Double.isNaN(targetValue)||targetValue<=0)){toast("اكتب حجماً صحيحاً أكبر من صفر");return;}if(targetValue!=null){target=(long)(targetValue*1024*1024);long videoRate=target*8_000/Math.max(1,b-a)-(audio.isChecked()?128_000:0);if(!convertMode&&info.size>0&&target>=info.size){toast("الحجم المستهدف يجب أن يكون أصغر من حجم الفيديو الأصلي");return;}if(videoRate<250_000){toast("الحجم المطلوب صغير جداً لهذه المدة؛ اختر حجماً أكبر");return;}}String selectedFormat=trimMode?"MP4_AVC":formatValues[outputFormat.getSelectedItemPosition()];startTranscode(chosen[0],a,b,audio.isChecked(),aspects[aspect.getSelectedItemPosition()],target,selectedFormat,resolutionValues[resolution.getSelectedItemPosition()],bitrateValues[videoBitrate.getSelectedItemPosition()]*1000,fpsValues[fps.getSelectedItemPosition()],videoAudioBitrateValues[videoAudioBitrate.getSelectedItemPosition()],videoSampleValues[videoSampleRate.getSelectedItemPosition()]);}); page.addView(go,matchTop(16));
+        Button go=action(trimMode?"✂ بدء القص":convertMode?"↻ بدء التحويل":"◫ بدء الضغط Pro",VIOLET); go.setOnClickListener(v->{long a=(long)(info.durationMs*trimBar.getStart()),b=(long)(info.durationMs*trimBar.getEnd());long target=0;String chosenFormat=trimMode?"MP4_AVC":formatValues[outputFormat.getSelectedItemPosition()];boolean copyOnly=chosenFormat.startsWith("REMUX_")||chosenFormat.startsWith("AUDIO_");Double targetValue=copyOnly?null:parseTargetMb(targetMb);if(targetValue!=null&&(Double.isNaN(targetValue)||targetValue<=0)){toast("اكتب حجماً صحيحاً أكبر من صفر");return;}if(targetValue!=null){target=(long)(targetValue*1024*1024);long videoRate=target*8_000/Math.max(1,b-a)-(audio.isChecked()?128_000:0);if(!convertMode&&info.size>0&&target>=info.size){toast("الحجم المستهدف يجب أن يكون أصغر من حجم الفيديو الأصلي");return;}if(videoRate<150_000){toast("الحجم المطلوب صغير جداً لهذه المدة؛ اختر حجماً أكبر");return;}}smartQuality=smart.isChecked();String selectedFormat=trimMode?"MP4_AVC":formatValues[outputFormat.getSelectedItemPosition()];startTranscode(chosen[0],a,b,audio.isChecked(),aspects[aspect.getSelectedItemPosition()],target,selectedFormat,resolutionValues[resolution.getSelectedItemPosition()],bitrateValues[videoBitrate.getSelectedItemPosition()]*1000,fpsValues[fps.getSelectedItemPosition()],videoAudioBitrateValues[videoAudioBitrate.getSelectedItemPosition()],videoSampleValues[videoSampleRate.getSelectedItemPosition()]);}); page.addView(go,matchTop(16));
         page.addView(label("قد يختلف الحجم النهائي حسب محتوى الفيديو وقدرات جهازك.",12,Color.GRAY,false),matchTop(10));
         setPage(page);
         int thumbnailGeneration=editorGeneration;
@@ -365,6 +401,10 @@ public final class MainActivity extends Activity {
         if(preview.isAvailable())openPlayer.run();
     }
 
+    private boolean smartQuality=true;
+    /** Preview box follows the video's shape (tall for vertical videos), capped at half the screen. */
+    private int previewHeight(){int screenW=getResources().getDisplayMetrics().widthPixels-dp(36),screenH=getResources().getDisplayMetrics().heightPixels;if(info==null||info.width<=0||info.height<=0)return dp(220);int h=Math.round(screenW*info.height/(float)info.width);return Math.max(dp(200),Math.min(h,Math.round(screenH*0.5f)));}
+
     private String estimate(VideoTranscoder.Preset p,long duration){long rate=p==VideoTranscoder.Preset.LOW?828_000:p==VideoTranscoder.Preset.MEDIUM?1_628_000:3_128_000;return VideoInfo.bytes(rate*Math.max(1,duration)/8000);}
     private Double parseTargetMb(EditText field){try{String value=field.getText().toString().trim();return value.isEmpty()?null:Double.parseDouble(value);}catch(Exception ignored){return Double.NaN;}}
 
@@ -374,13 +414,13 @@ public final class MainActivity extends Activity {
 
     private void startTranscode(VideoTranscoder.Preset preset,long start,long end,boolean audio,String aspect,long target,String outputFormat,int shortEdge,int videoBitrate,int frameRate,int audioBitrate,int audioSampleRate) {
         String codecMime=outputFormat.endsWith("HEVC")?MediaFormat.MIMETYPE_VIDEO_HEVC:outputFormat.endsWith("VP9")?MediaFormat.MIMETYPE_VIDEO_VP9:outputFormat.endsWith("VP8")?MediaFormat.MIMETYPE_VIDEO_VP8:MediaFormat.MIMETYPE_VIDEO_AVC;
-        if(!outputFormat.startsWith("FFMPEG")&&!supportsEncoder(codecMime)){toast("ترميز الصيغة المختارة غير مدعوم في هذا الجهاز");return;}
+        if((outputFormat.startsWith("MP4_")||outputFormat.startsWith("3GP_")||outputFormat.startsWith("WEBM_"))&&!supportsEncoder(codecMime)){toast("ترميز الصيغة المختارة غير مدعوم في هذا الجهاز");return;}
         if(outputFormat.startsWith("WEBM")&&audio)toast("ملاحظة: صوت WebM يُحفظ فقط إذا كان المصدر Opus أو Vorbis");
         cancelled.set(false); File dir=getExternalFilesDir("Movies"); if(dir==null)dir=new File(getFilesDir(),"Movies"); dir.mkdirs();
         String base=info.name.replaceAll("(?i)\\.[a-z0-9]{2,5}$","").replaceAll("[^a-zA-Z0-9._\u0600-\u06ff-]+","_");
-        String extension=outputFormat.startsWith("3GP")?".3gp":outputFormat.startsWith("WEBM")?".webm":outputFormat.endsWith("MKV")?".mkv":outputFormat.endsWith("MOV")?".mov":outputFormat.endsWith("AVI")?".avi":".mp4";
+        String extension="AUDIO_MP3".equals(outputFormat)?".mp3":"AUDIO_M4A".equals(outputFormat)?".m4a":"REMUX_MKV".equals(outputFormat)?".mkv":"REMUX_MOV".equals(outputFormat)?".mov":"REMUX_MP4".equals(outputFormat)?".mp4":outputFormat.startsWith("3GP")?".3gp":outputFormat.startsWith("WEBM")?".webm":outputFormat.endsWith("MKV")?".mkv":outputFormat.endsWith("MOV")?".mov":outputFormat.endsWith("AVI")?".avi":".mp4";
         File output=new File(dir,base+"_VideoX_"+System.currentTimeMillis()+extension); serviceJob=true; showProgress("جاري "+pendingMode+" الفيديو…");
-        Intent job=new Intent(this,ProcessingService.class).setAction(ProcessingService.ACTION_START).putExtra("input",selectedUri.toString()).putExtra("output",output.getAbsolutePath()).putExtra("original",info.size).putExtra("label","جاري "+pendingMode+" الفيديو…").putExtra("preset",preset.name()).putExtra("start",start).putExtra("end",end).putExtra("audio",audio).putExtra("aspect",aspect).putExtra("target",target).putExtra("outputFormat",outputFormat).putExtra("shortEdge",shortEdge).putExtra("videoBitrate",videoBitrate).putExtra("frameRate",frameRate).putExtra("audioBitrate",audioBitrate).putExtra("audioSampleRate",audioSampleRate);if(Build.VERSION.SDK_INT>=26)startForegroundService(job);else startService(job);
+        Intent job=new Intent(this,ProcessingService.class).setAction(ProcessingService.ACTION_START).putExtra("input",selectedUri.toString()).putExtra("output",output.getAbsolutePath()).putExtra("original",info.size).putExtra("label","جاري "+pendingMode+" الفيديو…").putExtra("preset",preset.name()).putExtra("start",start).putExtra("end",end).putExtra("audio",audio).putExtra("aspect",aspect).putExtra("target",target).putExtra("outputFormat",outputFormat).putExtra("shortEdge",shortEdge).putExtra("videoBitrate",videoBitrate).putExtra("frameRate",frameRate).putExtra("audioBitrate",audioBitrate).putExtra("audioSampleRate",audioSampleRate).putExtra("smart",smartQuality);if(Build.VERSION.SDK_INT>=26)startForegroundService(job);else startService(job);
     }
 
     private void showAudioPage(){homeScreen=false;processing=false;LinearLayout p=page();p.addView(titleBar("استوديو الصوت Pro",this::showHome));LinearLayout c=card();c.addView(label(info.name,17,Color.WHITE,true));c.addView(label(info.details(),13,Color.LTGRAY,false),matchTop(5));c.addView(label(info.technicalDetails(),13,Color.rgb(94,205,137),true),matchTop(6));p.addView(c,matchTop(12));p.addView(section("صيغة الإخراج"));String[] audioFormats={"MP3 — مشفّر LAME","WAV — PCM بدون فقدان","AAC — ملف ADTS حقيقي","M4A — AAC داخل MP4","OGG — Vorbis"};Spinner audioFormat=styledSpinner(audioFormats);p.addView(audioFormat);p.addView(section("الجودة ومعدل العينة"));String[] qualityNames={"64 kbps — صوت صغير","96 kbps","128 kbps — موصى به","160 kbps","192 kbps — جودة عالية","256 kbps","320 kbps — أعلى جودة"};int[] qualityValues={64,96,128,160,192,256,320};Spinner quality=styledSpinner(qualityNames);quality.setSelection(2);p.addView(quality);String[] sampleNames={"معدل العينة: الأصلي","32000 Hz","44100 Hz","48000 Hz"};int[] sampleValues={0,32000,44100,48000};Spinner sampleRate=styledSpinner(sampleNames);p.addView(sampleRate,matchTop(9));String[] volumeNames={"الصوت: 50%","الصوت: 100% — الأصلي","الصوت: 150%","الصوت: 200%"};float[] volumeValues={.5f,1f,1.5f,2f};Spinner volume=styledSpinner(volumeNames);volume.setSelection(1);p.addView(volume,matchTop(9));p.addView(section("قص الصوت بدقة"));LinearLayout range=row();EditText start=numberField("البداية بالثواني");EditText end=numberField("النهاية بالثواني");range.addView(start,weight());range.addView(end,weightMargin());p.addView(range);TextView expected=label("الحجم المتوقع عند 128 kbps: "+VideoInfo.bytes(info.durationMs*128/8),14,Color.rgb(94,205,137),true);expected.setGravity(Gravity.CENTER);p.addView(expected,matchTop(12));quality.setOnItemSelectedListener(new android.widget.AdapterView.OnItemSelectedListener(){public void onItemSelected(android.widget.AdapterView<?>a,View v,int position,long id){int kb=qualityValues[position];expected.setText("الحجم المتوقع عند "+kb+" kbps: "+VideoInfo.bytes(info.durationMs*kb/8));}public void onNothingSelected(android.widget.AdapterView<?>a){}});p.addView(label("الجودة ومعدل العينة ومستوى الصوت والقص تُطبّق فعلياً على الملف الناتج.",12,Color.rgb(151,170,205),false),matchTop(12));Button go=action("♫ بدء تحويل الصوت",VIOLET);go.setOnClickListener(v->{long startMs=parseSeconds(start,0),endMs=parseSeconds(end,info.durationMs);if(startMs<0||endMs<=startMs||endMs>info.durationMs+1000){toast("تحقق من وقت بداية ونهاية الصوت");return;}startAudioConvert(audioFormat.getSelectedItemPosition(),qualityValues[quality.getSelectedItemPosition()],sampleValues[sampleRate.getSelectedItemPosition()],volumeValues[volume.getSelectedItemPosition()],startMs,endMs);});p.addView(go,matchTop(20));setPage(p);}

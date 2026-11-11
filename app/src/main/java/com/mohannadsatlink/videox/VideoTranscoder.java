@@ -30,7 +30,14 @@ final class VideoTranscoder {
         int shortEdge;
         int videoBitrate;
         int frameRate;
+        /** Bitrate (bps) the audio will be re-encoded at afterwards; 0 = keep source audio. */
+        int audioBitrate;
+        /** Lower resolution/FPS automatically when the bitrate is too low for a clean picture. */
+        boolean smartQuality = true;
     }
+
+    /** Minimum bits per pixel per frame for a clean picture (hardware encoders). */
+    private static final double MIN_BPP_AVC = 0.045, MIN_BPP_HEVC = 0.028;
 
     private final Context context;
     private final AtomicBoolean cancelled;
@@ -71,38 +78,72 @@ final class VideoTranscoder {
                 else { outH = edge; outW = even(Math.round(edge * ratio)); }
             }
             String profile = options.outputFormat == null ? "MP4_AVC" : options.outputFormat;
-            int bitrate = preset == Preset.LOW ? 700_000 : preset == Preset.MEDIUM ? 1_500_000 : 3_000_000;
-            if (in.containsKey(MediaFormat.KEY_BIT_RATE)) bitrate = Math.min(bitrate, Math.max(300_000, in.getInteger(MediaFormat.KEY_BIT_RATE)));
-            if(options.videoBitrate>0)bitrate=options.videoBitrate;
-            if (options.targetBytes > 0) {
-                long seconds = Math.max(1, (endUs - startUs) / 1_000_000);
-                long totalRate = options.targetBytes * 8 / seconds;
-                int copiedAudioRate = options.keepAudio ? sourceAudioBitrate(input, profile.startsWith("WEBM")) : 0;
-                // Reserve four percent for the container and codec headers so the result stays near the requested size.
-                bitrate = (int)Math.max(250_000, Math.min(20_000_000, totalRate * 96 / 100 - copiedAudioRate));
-            }
-
             String outputMime = profile.endsWith("HEVC") ? MediaFormat.MIMETYPE_VIDEO_HEVC
                     : profile.endsWith("VP9") ? MediaFormat.MIMETYPE_VIDEO_VP9
                     : profile.endsWith("VP8") ? MediaFormat.MIMETYPE_VIDEO_VP8
                     : MediaFormat.MIMETYPE_VIDEO_AVC;
-            MediaFormat out = MediaFormat.createVideoFormat(outputMime, outW, outH);
-            out.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
-            out.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
-            int outputFps=options.frameRate>0?options.frameRate:(in.containsKey(MediaFormat.KEY_FRAME_RATE) ? Math.min(60, Math.max(15, in.getInteger(MediaFormat.KEY_FRAME_RATE))) : 30);
-            out.setInteger(MediaFormat.KEY_FRAME_RATE, outputFps);
-            out.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
+            boolean efficientCodec = MediaFormat.MIMETYPE_VIDEO_HEVC.equals(outputMime) || MediaFormat.MIMETYPE_VIDEO_VP9.equals(outputMime);
+            int sourceFps = in.containsKey(MediaFormat.KEY_FRAME_RATE) ? safeInt(in, MediaFormat.KEY_FRAME_RATE, 30) : 30;
+            int outputFps = options.frameRate > 0 ? options.frameRate : Math.min(60, Math.max(15, sourceFps));
+            int sourceBitrate = in.containsKey(MediaFormat.KEY_BIT_RATE) ? safeInt(in, MediaFormat.KEY_BIT_RATE, 0) : 0;
 
+            int bitrate;
+            if (options.videoBitrate > 0) {
+                bitrate = options.videoBitrate;
+            } else if (options.targetBytes > 0) {
+                long seconds = Math.max(1, (endUs - startUs) / 1_000_000);
+                long totalRate = options.targetBytes * 8 / seconds;
+                int audioRate = !options.keepAudio ? 0 : options.audioBitrate > 0 ? options.audioBitrate : sourceAudioBitrate(input, profile.startsWith("WEBM"));
+                // Reserve four percent for the container and codec headers so the result stays near the requested size.
+                bitrate = (int) Math.max(150_000, Math.min(20_000_000, totalRate * 96 / 100 - audioRate));
+            } else {
+                // Content-aware: bitrate follows resolution and frame rate instead of fixed values.
+                double bpp = preset == Preset.LOW ? 0.05 : preset == Preset.MEDIUM ? 0.075 : 0.11;
+                if (efficientCodec) bpp *= 0.65;
+                bitrate = (int) Math.round((double) outW * outH * outputFps * bpp);
+                if (sourceBitrate > 0) {
+                    double cap = preset == Preset.LOW ? 0.5 : preset == Preset.MEDIUM ? 0.7 : 0.9;
+                    bitrate = (int) Math.min(bitrate, sourceBitrate * cap);
+                }
+                bitrate = Math.max(250_000, bitrate);
+            }
+
+            // Quality guard: too few bits for this many pixels gives blocky video. Trading some
+            // resolution (and then frame rate) for bits looks much cleaner at the same file size.
+            if (options.smartQuality && options.videoBitrate <= 0 && "الأصلي".equals(options.aspect)) {
+                double minBpp = efficientCodec ? MIN_BPP_HEVC : MIN_BPP_AVC;
+                while (bitrate / ((double) outW * outH * outputFps) < minBpp && Math.min(outW, outH) > 480) {
+                    float shrink = Math.max(480f / Math.min(outW, outH), 0.75f);
+                    outW = even(Math.round(outW * shrink));
+                    outH = even(Math.round(outH * shrink));
+                }
+                if (bitrate / ((double) outW * outH * outputFps) < minBpp && options.frameRate <= 0 && outputFps > 24) outputFps = 24;
+            }
+
+            MediaCodecInfo.CodecProfileLevel best = null;
             encoder = MediaCodec.createEncoderByType(outputMime);
+            int bitrateMode = -1;
             try {
-                MediaCodecInfo.EncoderCapabilities capabilities = encoder.getCodecInfo()
-                        .getCapabilitiesForType(outputMime).getEncoderCapabilities();
+                MediaCodecInfo.CodecCapabilities caps = encoder.getCodecInfo().getCapabilitiesForType(outputMime);
+                MediaCodecInfo.EncoderCapabilities capabilities = caps.getEncoderCapabilities();
                 if ((options.targetBytes > 0 || options.videoBitrate > 0) && capabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR))
-                    out.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR);
+                    bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_CBR;
                 else if (capabilities.isBitrateModeSupported(MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR))
-                    out.setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR);
+                    bitrateMode = MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR;
+                // H.264 High profile compresses noticeably better than Baseline at the same bitrate.
+                int wanted = MediaFormat.MIMETYPE_VIDEO_AVC.equals(outputMime) ? MediaCodecInfo.CodecProfileLevel.AVCProfileHigh
+                        : MediaFormat.MIMETYPE_VIDEO_HEVC.equals(outputMime) ? MediaCodecInfo.CodecProfileLevel.HEVCProfileMain : -1;
+                if (wanted > 0 && caps.profileLevels != null)
+                    for (MediaCodecInfo.CodecProfileLevel pl : caps.profileLevels)
+                        if (pl.profile == wanted && (best == null || pl.level > best.level)) best = pl;
             } catch (Exception ignored) {}
-            encoder.configure(out, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            try {
+                encoder.configure(videoFormat(outputMime, outW, outH, bitrate, outputFps, bitrateMode, best), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            } catch (Exception profileRejected) {
+                // Some encoders advertise a profile but refuse it: retry with the plain settings.
+                encoder.reset();
+                encoder.configure(videoFormat(outputMime, outW, outH, bitrate, outputFps, bitrateMode, null), null, null, MediaCodec.CONFIGURE_FLAG_ENCODE);
+            }
             encoderInput = encoder.createInputSurface();
             codecSurface = new CodecSurface(encoderInput, outW, outH, srcW, srcH);
             encoder.start();
@@ -140,7 +181,7 @@ final class VideoTranscoder {
             boolean inputDone = false, decoderDone = false, encoderDone = false;
             int videoOutTrack = -1;
             long rangeUs = Math.max(1, endUs - startUs), lastProgress = -1;
-            long nextFrameUs=0, frameIntervalUs=options.frameRate>0?1_000_000L/options.frameRate:0;
+            long nextFrameUs=0, frameIntervalUs=(options.frameRate>0||outputFps<sourceFps-1)?1_000_000L/Math.max(1,outputFps):0;
 
             while (!encoderDone) {
                 if (cancelled.get()) throw new InterruptedException("تم إلغاء العملية");
@@ -266,5 +307,23 @@ final class VideoTranscoder {
             try { ex.release(); } catch (Exception ignored) {}
         }
     }
+    private static MediaFormat videoFormat(String mime, int w, int h, int bitrate, int fps, int bitrateMode, MediaCodecInfo.CodecProfileLevel profile) {
+        MediaFormat out = MediaFormat.createVideoFormat(mime, w, h);
+        out.setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface);
+        out.setInteger(MediaFormat.KEY_BIT_RATE, bitrate);
+        out.setInteger(MediaFormat.KEY_FRAME_RATE, fps);
+        out.setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2);
+        if (bitrateMode >= 0) out.setInteger(MediaFormat.KEY_BITRATE_MODE, bitrateMode);
+        if (profile != null) {
+            out.setInteger(MediaFormat.KEY_PROFILE, profile.profile);
+            out.setInteger(MediaFormat.KEY_LEVEL, profile.level);
+        }
+        return out;
+    }
+
+    private static int safeInt(MediaFormat f, String key, int fallback) {
+        try { return f.getInteger(key); } catch (Exception e) { try { return Math.round(f.getFloat(key)); } catch (Exception ignored) { return fallback; } }
+    }
+
     private static int even(int value) { return Math.max(2, value & ~1); }
 }

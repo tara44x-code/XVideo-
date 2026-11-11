@@ -71,6 +71,147 @@ final class FfmpegTranscoder {
         listener.onProgress(100);
     }
 
+    /** One timeline piece for {@link #exportTimeline}. */
+    static final class Segment {
+        Uri uri; long inMs, outMs; float speed = 1f; boolean muted, hasVideo, hasAudio;
+        long outputMs() { return Math.max(1, Math.round((outMs - inMs) / (double) speed)); }
+    }
+
+    /**
+     * Renders the editor timeline: every segment is cut from its source, scaled/padded to one canvas,
+     * sped up/down, then all segments are concatenated. With audioFormat set ("MP3", "M4A", "WAV")
+     * only the audio is exported.
+     */
+    void exportTimeline(List<Segment> segments, File output, int width, int height, int videoBitrate,
+                        boolean blurBackground, String audioFormat, int audioBitrateKbps, Listener listener) throws Exception {
+        if (segments.isEmpty()) throw new IllegalArgumentException("لا توجد مقاطع للتصدير");
+        boolean audioOnly = audioFormat != null && !audioFormat.isEmpty();
+        int w = even(width), h = even(height);
+        ArrayList<String> args = new ArrayList<>();
+        args.add("-y");
+        long totalMs = 0;
+        for (Segment seg : segments) {
+            args.add("-ss"); args.add(seconds(seg.inMs));
+            args.add("-t"); args.add(seconds(Math.max(1, seg.outMs - seg.inMs)));
+            args.add("-i"); args.add(source(seg.uri));
+            totalMs += seg.outputMs();
+        }
+        StringBuilder f = new StringBuilder();
+        StringBuilder concatInputs = new StringBuilder();
+        for (int i = 0; i < segments.size(); i++) {
+            Segment seg = segments.get(i);
+            String speed = String.format(java.util.Locale.US, "%.4f", Math.max(.5f, Math.min(2f, seg.speed)));
+            String duration = seconds(seg.outputMs());
+            if (!audioOnly) {
+                if (seg.hasVideo && blurBackground) {
+                    int bw = even(Math.max(16, w / 4)), bh = even(Math.max(16, h / 4));
+                    f.append('[').append(i).append(":v]split=2[bg").append(i).append("][fg").append(i).append("];")
+                     .append("[bg").append(i).append("]scale=").append(bw).append(':').append(bh)
+                     .append(":force_original_aspect_ratio=increase,crop=").append(bw).append(':').append(bh)
+                     .append(",gblur=sigma=10,scale=").append(w).append(':').append(h).append(",setsar=1[bb").append(i).append("];")
+                     .append("[fg").append(i).append("]scale=").append(w).append(':').append(h)
+                     .append(":force_original_aspect_ratio=decrease,setsar=1[ff").append(i).append("];")
+                     .append("[bb").append(i).append("][ff").append(i).append("]overlay=(main_w-overlay_w)/2:(main_h-overlay_h)/2,")
+                     .append("setpts=(PTS-STARTPTS)/").append(speed).append(",fps=30,format=yuv420p[v").append(i).append("];");
+                } else if (seg.hasVideo) {
+                    f.append('[').append(i).append(":v]scale=").append(w).append(':').append(h)
+                     .append(":force_original_aspect_ratio=decrease,pad=").append(w).append(':').append(h)
+                     .append(":(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,setpts=(PTS-STARTPTS)/").append(speed)
+                     .append(",fps=30,format=yuv420p[v").append(i).append("];");
+                } else {
+                    f.append("color=c=black:s=").append(w).append('x').append(h).append(":r=30:d=").append(duration)
+                     .append(",format=yuv420p,setsar=1[v").append(i).append("];");
+                }
+                concatInputs.append("[v").append(i).append(']');
+            }
+            if (seg.hasAudio && !seg.muted) {
+                f.append('[').append(i).append(":a]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo");
+                if (Math.abs(seg.speed - 1f) > .001f) f.append(",atempo=").append(speed);
+                f.append(",asetpts=PTS-STARTPTS[a").append(i).append("];");
+            } else {
+                f.append("anullsrc=r=48000:cl=stereo,atrim=duration=").append(duration)
+                 .append(",aformat=sample_fmts=fltp:channel_layouts=stereo,asetpts=PTS-STARTPTS[a").append(i).append("];");
+            }
+            concatInputs.append("[a").append(i).append(']');
+        }
+        f.append(concatInputs).append("concat=n=").append(segments.size())
+         .append(audioOnly ? ":v=0:a=1[aout]" : ":v=1:a=1[vout][aout]");
+        args.add("-filter_complex"); args.add(f.toString());
+        if (!audioOnly) { args.add("-map"); args.add("[vout]"); }
+        args.add("-map"); args.add("[aout]");
+        args.add("-map_metadata"); args.add("-1");
+
+        if (audioOnly) {
+            int kbps = Math.max(64, Math.min(320, audioBitrateKbps));
+            if ("WAV".equals(audioFormat)) { args.add("-c:a"); args.add("pcm_s16le"); args.add("-f"); args.add("wav"); }
+            else if ("M4A".equals(audioFormat)) { args.add("-c:a"); args.add("aac"); args.add("-b:a"); args.add(kbps + "k"); args.add("-f"); args.add("mp4"); }
+            else { args.add("-c:a"); args.add("libmp3lame"); args.add("-b:a"); args.add(kbps + "k"); args.add("-f"); args.add("mp3"); }
+            args.add(output.getAbsolutePath());
+            runPass(args, totalMs, listener, "فشل تصدير الصوت");
+            listener.onProgress(100);
+            return;
+        }
+        int codecAt = args.size();
+        args.add("-c:v"); args.add("h264_mediacodec"); args.add("-b:v"); args.add(String.valueOf(Math.max(500_000, videoBitrate)));
+        args.add("-c:a"); args.add("aac"); args.add("-b:a"); args.add("192k");
+        args.add("-movflags"); args.add("+faststart");
+        args.add(output.getAbsolutePath());
+        runWithFallbackEncoders(args, codecAt, Math.max(500_000, videoBitrate), output, totalMs, listener, "فشل تصدير الفيديو");
+        listener.onProgress(100);
+    }
+
+    /** Copies streams into another container without re-encoding (instant, no quality loss). */
+    void remux(Uri input, File output, String container, long startMs, long endMs, long durationMs, Listener listener) throws Exception {
+        ArrayList<String> args = new ArrayList<>();
+        args.add("-y");
+        if (startMs > 0) { args.add("-ss"); args.add(seconds(startMs)); }
+        if (endMs > startMs) { args.add("-t"); args.add(seconds(endMs - startMs)); }
+        args.add("-i"); args.add(source(input));
+        args.add("-map"); args.add("0:v:0?"); args.add("-map"); args.add("0:a?");
+        args.add("-c"); args.add("copy");
+        if ("mp4".equals(container) || "mov".equals(container)) { args.add("-movflags"); args.add("+faststart"); }
+        args.add("-f"); args.add(container);
+        args.add(output.getAbsolutePath());
+        try {
+            runPass(args, Math.max(1, endMs > startMs ? endMs - startMs : durationMs), listener, "تعذر تغيير الصيغة بدون إعادة ضغط؛ اختر صيغة مع ضغط");
+        } catch (Exception e) {
+            if (output.exists()) output.delete();
+            throw e;
+        }
+        listener.onProgress(100);
+    }
+
+    private void runWithFallbackEncoders(ArrayList<String> args, int codecAt, int bitrate, File output, long durationMs,
+                                         Listener listener, String errorPrefix) throws Exception {
+        // Some phones reject FFmpeg's MediaCodec H.264 encoder; fall back to OpenH264, then MPEG-4 Part 2.
+        String[][] encoders = {{"h264_mediacodec", "-b:v", String.valueOf(bitrate)}, {"libopenh264", "-b:v", String.valueOf(bitrate)}, {"mpeg4", "-q:v", "3"}};
+        Exception last = null;
+        for (String[] encoder : encoders) {
+            ArrayList<String> attempt = new ArrayList<>(args);
+            attempt.set(codecAt + 1, encoder[0]);
+            attempt.set(codecAt + 2, encoder[1]);
+            attempt.set(codecAt + 3, encoder[2]);
+            try {
+                runPass(attempt, durationMs, listener, errorPrefix);
+                return;
+            } catch (InterruptedException cancelledError) {
+                if (output.exists()) output.delete();
+                throw cancelledError;
+            } catch (Exception failed) {
+                last = failed;
+                if (output.exists()) output.delete();
+                if (cancelled.get()) throw new InterruptedException("تم إلغاء العملية");
+            }
+        }
+        if (last != null) throw last;
+    }
+
+    private String source(Uri input) {
+        return "file".equals(input.getScheme()) ? input.getPath() : FFmpegKitConfig.getSafParameterForRead(context, input);
+    }
+
+    private static int even(int v) { return Math.max(2, v & ~1); }
+
     private String seconds(long valueMs){return String.format(java.util.Locale.US,"%.3f",valueMs/1000d);}
     private String join(List<String> values){StringBuilder out=new StringBuilder();for(String value:values){if(out.length()>0)out.append(',');out.append(value);}return out.toString();}
     private void runPass(ArrayList<String> args,long durationMs,Listener listener,String errorPrefix)throws Exception{

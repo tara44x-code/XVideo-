@@ -92,7 +92,14 @@ public final class ProcessingService extends Service {
         File destination = output == null ? null : new File(output);
         boolean success = false;
         try {
-            if (input == null || destination == null) throw new IllegalArgumentException("بيانات العملية غير مكتملة");
+            if (destination == null) throw new IllegalArgumentException("بيانات العملية غير مكتملة");
+            if ("timeline".equals(intent.getStringExtra("jobKind"))) {
+                runTimeline(intent, destination);
+                success = true;
+                finishSuccess(output, "اكتمل تصدير المشروع");
+                return;
+            }
+            if (input == null) throw new IllegalArgumentException("بيانات العملية غير مكتملة");
             Uri source = Uri.parse(input);
 
             if ("studio".equals(intent.getStringExtra("jobKind"))) {
@@ -120,12 +127,24 @@ public final class ProcessingService extends Service {
             o.shortEdge = intent.getIntExtra("shortEdge", 0);
             o.videoBitrate = intent.getIntExtra("videoBitrate", 0);
             o.frameRate = intent.getIntExtra("frameRate", 0);
+            o.audioBitrate = intent.getIntExtra("audioBitrate", 128) * 1000;
+            o.smartQuality = intent.getBooleanExtra("smart", true);
             int audioBitrate = intent.getIntExtra("audioBitrate", 128);
             int audioSampleRate = intent.getIntExtra("audioSampleRate", 0);
             long duration = o.endMs > o.startMs ? o.endMs - o.startMs : new VideoInfo(this, source).durationMs;
             String requested = o.outputFormat;
 
-            if (requested != null && requested.startsWith("FFMPEG")) {
+            if (requested != null && requested.startsWith("REMUX_")) {
+                // Change container only: no re-encoding, so quality is identical and it takes seconds.
+                String container = requested.endsWith("MKV") ? "matroska" : requested.endsWith("MOV") ? "mov" : "mp4";
+                new FfmpegTranscoder(this, cancelled).remux(source, destination, container, o.startMs, o.endMs, duration, this::progress);
+            } else if ("AUDIO_MP3".equals(requested)) {
+                // Built-in LAME encoder: works on every CPU, including 32-bit phones.
+                new Mp3Transcoder(this, cancelled).convert(source, destination, audioBitrate, audioSampleRate, o.startMs, o.endMs, 1f, this::progress);
+            } else if (requested != null && requested.startsWith("AUDIO_")) {
+                long end = o.endMs > o.startMs ? o.endMs : o.startMs + duration;
+                new FfmpegTranscoder(this, cancelled).convertAudio(source, destination, "M4A", audioBitrate, audioSampleRate, o.startMs, end, 1f, this::progress);
+            } else if (requested != null && requested.startsWith("FFMPEG")) {
                 // MKV / MOV / AVI: encode with MediaCodec first, then remux/convert with FFmpeg.
                 temp = new File(destination.getParentFile(), ".videox_intermediate_" + System.currentTimeMillis() + ".mp4");
                 o.outputFormat = "MP4_AVC";
@@ -154,6 +173,32 @@ public final class ProcessingService extends Service {
             if (!success && destination != null && destination.exists()) destination.delete();
             stopSelf();
         }
+    }
+
+    /** Renders the clips arranged in {@link EditorActivity}. */
+    private void runTimeline(Intent intent, File destination) throws Exception {
+        String[] uris = intent.getStringArrayExtra("uris");
+        long[] ins = intent.getLongArrayExtra("ins"), outs = intent.getLongArrayExtra("outs");
+        float[] speeds = intent.getFloatArrayExtra("speeds");
+        boolean[] muted = intent.getBooleanArrayExtra("muted"), hasVideo = intent.getBooleanArrayExtra("hasVideo"), hasAudio = intent.getBooleanArrayExtra("hasAudio");
+        if (uris == null || ins == null || outs == null || speeds == null || muted == null || hasVideo == null || hasAudio == null || uris.length == 0)
+            throw new IllegalArgumentException("المشروع فارغ");
+        ArrayList<FfmpegTranscoder.Segment> segments = new ArrayList<>();
+        for (int i = 0; i < uris.length; i++) {
+            FfmpegTranscoder.Segment seg = new FfmpegTranscoder.Segment();
+            seg.uri = Uri.parse(uris[i]);
+            seg.inMs = ins[i];
+            seg.outMs = outs[i];
+            seg.speed = speeds[i];
+            seg.muted = muted[i];
+            seg.hasVideo = hasVideo[i];
+            seg.hasAudio = hasAudio[i];
+            segments.add(seg);
+        }
+        new FfmpegTranscoder(this, cancelled).exportTimeline(segments, destination,
+                intent.getIntExtra("width", 1280), intent.getIntExtra("height", 720), intent.getIntExtra("videoBitrate", 4_000_000),
+                intent.getBooleanExtra("blur", false), intent.getStringExtra("audioFormat"), intent.getIntExtra("audioBitrate", 192),
+                this::progress);
     }
 
     private void runBatch(Intent intent, String[] inputs) {
