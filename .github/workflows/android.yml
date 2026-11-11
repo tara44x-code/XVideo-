@@ -1,0 +1,64 @@
+name: Android build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    env:
+      HAS_KEYSTORE: ${{ secrets.VIDEOX_KEYSTORE_BASE64 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: gradle/actions/setup-gradle@v4
+
+      - name: Build debug APK
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: Upload debug APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoX-debug-apk
+          path: app/build/outputs/apk/debug/*.apk
+
+      # Signed release build. Runs only when the signing secrets are configured:
+      # VIDEOX_KEYSTORE_BASE64, VIDEOX_KEYSTORE_PASSWORD, VIDEOX_KEY_ALIAS, VIDEOX_KEY_PASSWORD
+      - name: Build signed release APK
+        if: ${{ env.HAS_KEYSTORE == 'true' }}
+        env:
+          VIDEOX_KEYSTORE_BASE64: ${{ secrets.VIDEOX_KEYSTORE_BASE64 }}
+          VIDEOX_KEYSTORE_PASSWORD: ${{ secrets.VIDEOX_KEYSTORE_PASSWORD }}
+          VIDEOX_KEY_ALIAS: ${{ secrets.VIDEOX_KEY_ALIAS }}
+          VIDEOX_KEY_PASSWORD: ${{ secrets.VIDEOX_KEY_PASSWORD }}
+        run: |
+          mkdir -p signing
+          echo "$VIDEOX_KEYSTORE_BASE64" | base64 -d > signing/release.keystore
+          export VIDEOX_KEYSTORE_PATH=signing/release.keystore
+          ./gradlew --no-daemon assembleRelease
+          rm -f signing/release.keystore
+
+      - name: Upload release APK
+        if: ${{ env.HAS_KEYSTORE == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: VideoX-release-apk
+          path: app/build/outputs/apk/release/*.apk
+
+      - name: Publish GitHub release (tags only)
+        if: ${{ startsWith(github.ref, 'refs/tags/v') && env.HAS_KEYSTORE == 'true' }}
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app/build/outputs/apk/release/*.apk

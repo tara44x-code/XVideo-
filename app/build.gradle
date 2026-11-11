@@ -1,0 +1,80 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Release signing is read from keystore.properties (never committed) or from
+// environment variables in CI. Without them, assembleRelease builds an unsigned APK.
+def keystoreProps = new Properties()
+def keystoreFile = rootProject.file('keystore.properties')
+if (keystoreFile.exists()) {
+    keystoreFile.withInputStream { keystoreProps.load(it) }
+}
+def signingValue = { String key, String env ->
+    def value = keystoreProps.getProperty(key) ?: System.getenv(env)
+    return value?.trim() ? value.trim() : null
+}
+def releaseStoreFile = signingValue('storeFile', 'VIDEOX_KEYSTORE_PATH')
+def hasReleaseSigning = releaseStoreFile != null && rootProject.file(releaseStoreFile).exists()
+
+android {
+    namespace 'com.mohannadsatlink.videox'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'com.mohannadsatlink.videox'
+        minSdk 26
+        targetSdk 35
+        versionCode 16
+        versionName '5.2'
+    }
+
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile rootProject.file(releaseStoreFile)
+                storePassword signingValue('storePassword', 'VIDEOX_KEYSTORE_PASSWORD')
+                keyAlias signingValue('keyAlias', 'VIDEOX_KEY_ALIAS') ?: 'videox'
+                keyPassword signingValue('keyPassword', 'VIDEOX_KEY_PASSWORD')
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+        }
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    packaging {
+        jniLibs {
+            // Native libraries are loaded from the APK directly (smaller install, faster updates).
+            useLegacyPackaging false
+        }
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds true
+    }
+}
+
+dependencies {
+    implementation files('libs/TAndroidLame-1.1.aar')
+    implementation files('libs/ffmpeg-kit-full-8.1.7.aar')
+    implementation files('libs/smart-exception-common-0.2.1.jar')
+    implementation files('libs/smart-exception-java-0.2.1.jar')
+}

@@ -1,0 +1,23 @@
+# Build output
+build/
+app/build/
+dist/
+*.apk
+*.aab
+*.idsig
+
+# Gradle / IDE
+.gradle/
+.idea/
+*.iml
+local.properties
+.DS_Store
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Signing secrets — never commit these
+keystore.properties
+signing/
+*.keystore
+*.jks
