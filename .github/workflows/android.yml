@@ -34,6 +34,11 @@ jobs:
           name: VideoX-debug-apk
           path: app/build/outputs/apk/debug/*.apk
 
+      # Without signing secrets, still build release to verify R8/ProGuard (unsigned APK).
+      - name: Check release build (unsigned)
+        if: ${{ env.HAS_KEYSTORE != 'true' }}
+        run: ./gradlew --no-daemon assembleRelease
+
       # Signed release build. Runs only when the signing secrets are configured:
       # VIDEOX_KEYSTORE_BASE64, VIDEOX_KEYSTORE_PASSWORD, VIDEOX_KEY_ALIAS, VIDEOX_KEY_PASSWORD
       - name: Build signed release APK
