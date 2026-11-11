@@ -236,8 +236,8 @@ public final class EditorActivity extends Activity implements TimelineView.Liste
         Button add = pill("+", VIOLET);
         add.setTextSize(24);
         add.setOnClickListener(v -> pickMedia());
-        FrameLayout.LayoutParams addParams = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.END | Gravity.CENTER_VERTICAL);
-        addParams.setMarginEnd(dp(8));
+        FrameLayout.LayoutParams addParams = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        addParams.rightMargin = dp(8);
         addParams.topMargin = dp(6);
         timelineFrame.addView(add, addParams);
         page.addView(timelineFrame, new LinearLayout.LayoutParams(-1, dp(160)));
