@@ -62,8 +62,23 @@ jobs:
           name: VideoX-release-apk
           path: app/build/outputs/apk/release/*.apk
 
-      - name: Publish GitHub release (tags only)
-        if: ${{ startsWith(github.ref, 'refs/tags/v') && env.HAS_KEYSTORE == 'true' }}
+      # On a tag (e.g. v5.2): attach the APKs to a GitHub Release so they can be
+      # downloaded directly from the phone (Releases page, no login needed).
+      - name: Prepare release files
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+        run: |
+          mkdir -p out
+          cp app/build/outputs/apk/debug/*.apk "out/VideoX-Compressor-Pro-${GITHUB_REF_NAME}-test.apk"
+          if [ "$HAS_KEYSTORE" = "true" ]; then
+            cp app/build/outputs/apk/release/*.apk "out/VideoX-Compressor-Pro-${GITHUB_REF_NAME}.apk"
+          fi
+
+      - name: Publish GitHub release
+        if: ${{ startsWith(github.ref, 'refs/tags/v') }}
         uses: softprops/action-gh-release@v2
         with:
-          files: app/build/outputs/apk/release/*.apk
+          name: VideoX Compressor Pro ${{ github.ref_name }}
+          body: |
+            - `*-test.apk`: نسخة تجريبية تنزل جنب النسخة الأصلية بدون ما تمسحها.
+            - راجع CHANGELOG.md لتفاصيل التغييرات.
+          files: out/*.apk
