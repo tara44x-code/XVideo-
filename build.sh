@@ -50,7 +50,7 @@ unzip -q "$libs/ffmpeg-kit-full-8.1.7.aar" -d "$ffmpeg_dir"
 # The source manifest has no package attribute (AGP 8 uses `namespace`) and uses
 # ${applicationId}; aapt2 needs both resolved.
 manifest="$run_dir/AndroidManifest.xml"
-sed -e "s|<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\">|<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"$app_id\">|" \
+sed -e "s|<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\"|<manifest xmlns:android=\"http://schemas.android.com/apk/res/android\" package=\"$app_id\"|" \
     -e "s|\${applicationId}|$app_id|g" "$project_dir/app/src/main/AndroidManifest.xml" > "$manifest"
 
 "$build_tools/aapt2" compile --dir "$project_dir/app/src/main/res" -o "$run_dir/compiled.zip"
