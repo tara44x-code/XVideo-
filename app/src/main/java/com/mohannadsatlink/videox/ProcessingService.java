@@ -144,22 +144,8 @@ public final class ProcessingService extends Service {
             } else if (requested != null && requested.startsWith("AUDIO_")) {
                 long end = o.endMs > o.startMs ? o.endMs : o.startMs + duration;
                 new FfmpegTranscoder(this, cancelled).convertAudio(source, destination, "M4A", audioBitrate, audioSampleRate, o.startMs, end, 1f, this::progress);
-            } else if (requested != null && requested.startsWith("FFMPEG")) {
-                // MKV / MOV / AVI: encode with MediaCodec first, then remux/convert with FFmpeg.
-                temp = new File(destination.getParentFile(), ".videox_intermediate_" + System.currentTimeMillis() + ".mp4");
-                o.outputFormat = "MP4_AVC";
-                new VideoTranscoder(this, cancelled).transcode(source, temp, o, p -> progress(p * 75 / 100));
-                new FfmpegTranscoder(this, cancelled).convertContainer(Uri.fromFile(temp), destination, requested,
-                        duration, audioBitrate, audioSampleRate, p -> progress(75 + p / 4));
-            } else if (o.keepAudio) {
-                // Encode video, then re-encode audio to the requested quality.
-                String suffix = requested != null && requested.startsWith("WEBM") ? ".webm"
-                        : requested != null && requested.startsWith("3GP") ? ".3gp" : ".mp4";
-                temp = new File(destination.getParentFile(), ".videox_audio_" + System.currentTimeMillis() + suffix);
-                new VideoTranscoder(this, cancelled).transcode(source, temp, o, p -> progress(p * 75 / 100));
-                new FfmpegTranscoder(this, cancelled).adjustVideoAudio(Uri.fromFile(temp), destination,
-                        requested == null ? "MP4_AVC" : requested, duration, audioBitrate, audioSampleRate,
-                        p -> progress(75 + p / 4));
+            } else if (o.keepAudio || (requested != null && requested.startsWith("FFMPEG"))) {
+                temp = encodeWithSourceAudio(source, destination, o, audioBitrate, audioSampleRate, duration, 0, 100);
             } else {
                 new VideoTranscoder(this, cancelled).transcode(source, destination, o, this::progress);
             }
@@ -173,6 +159,39 @@ public final class ProcessingService extends Service {
             if (!success && destination != null && destination.exists()) destination.delete();
             stopSelf();
         }
+    }
+
+    /**
+     * Encodes the video with MediaCodec (no audio), then lets FFmpeg add the source audio at the
+     * requested quality in the requested container. Progress is mapped into [from, to].
+     * Returns the temporary file (caller deletes it).
+     */
+    private File encodeWithSourceAudio(Uri source, File destination, VideoTranscoder.Options o, int audioKbps,
+                                       int sampleRate, long durationMs, int from, int to) throws Exception {
+        String requested = o.outputFormat == null ? "MP4_AVC" : o.outputFormat;
+        String suffix = requested.startsWith("WEBM") ? ".webm" : requested.startsWith("3GP") ? ".3gp" : ".mp4";
+        File temp = new File(destination.getParentFile(), ".videox_video_" + System.currentTimeMillis() + suffix);
+        VideoTranscoder.Options videoOnly = o;
+        if (requested.startsWith("FFMPEG")) o.outputFormat = "MP4_AVC";
+        videoOnly.muxAudio = false;
+        int split = from + (to - from) * 85 / 100;
+        try {
+            new VideoTranscoder(this, cancelled).transcode(source, temp, videoOnly, p -> progress(from + (split - from) * p / 100));
+            if (o.keepAudio) {
+                new FfmpegTranscoder(this, cancelled).muxWithSourceAudio(Uri.fromFile(temp), source, o.startMs, o.endMs, destination,
+                        requested, audioKbps, sampleRate, durationMs, p -> progress(split + (to - split) * p / 100));
+            } else {
+                // Container change only (MKV/MOV/AVI without audio).
+                new FfmpegTranscoder(this, cancelled).muxWithSourceAudio(Uri.fromFile(temp), Uri.fromFile(temp), 0, 0, destination,
+                        requested, audioKbps, sampleRate, durationMs, p -> progress(split + (to - split) * p / 100));
+            }
+        } catch (Exception e) {
+            temp.delete();
+            throw e;
+        } finally {
+            o.outputFormat = requested;
+        }
+        return temp;
     }
 
     /** Renders the clips arranged in {@link EditorActivity}. */
@@ -220,9 +239,12 @@ public final class ProcessingService extends Service {
                 o.endMs = 0;
                 o.keepAudio = true;
                 o.outputFormat = "MP4_AVC";
-                int item = index;
-                new VideoTranscoder(this, cancelled).transcode(Uri.parse(inputs[index]), current, o,
-                        p -> progress((item * 100 + p) / inputs.length));
+                o.audioBitrate = 128_000;
+                Uri src = Uri.parse(inputs[index]);
+                long duration = new VideoInfo(this, src).durationMs;
+                File tmp = encodeWithSourceAudio(src, current, o, 128, 0, duration,
+                        index * 100 / inputs.length, (index + 1) * 100 / inputs.length);
+                if (tmp != null) tmp.delete();
                 results.add(current.getAbsolutePath());
                 current = null;
             }

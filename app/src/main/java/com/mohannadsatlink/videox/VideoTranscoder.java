@@ -34,6 +34,8 @@ final class VideoTranscoder {
         int audioBitrate;
         /** Lower resolution/FPS automatically when the bitrate is too low for a clean picture. */
         boolean smartQuality = true;
+        /** Copy the source audio track with MediaMuxer. Off when FFmpeg adds the audio afterwards. */
+        boolean muxAudio = true;
     }
 
     /** Minimum bits per pixel per frame for a clean picture (hardware encoders). */
@@ -160,7 +162,7 @@ final class VideoTranscoder {
             if (rotation != 0 && !profile.startsWith("WEBM")) muxer.setOrientationHint(rotation);
 
             int audioOutTrack = -1;
-            if (options.keepAudio) {
+            if (options.keepAudio && options.muxAudio) {
                 audioExtractor = new MediaExtractor(); setSource(audioExtractor, input);
                 int at = findTrack(audioExtractor, "audio/");
                 if (at >= 0) {
@@ -168,8 +170,13 @@ final class VideoTranscoder {
                     String audioMime = audioFormat.getString(MediaFormat.KEY_MIME);
                     boolean webmAudio = audioMime != null && (audioMime.equals("audio/opus") || audioMime.equals("audio/vorbis"));
                     if (!profile.startsWith("WEBM") || webmAudio) {
-                        audioExtractor.selectTrack(at);
-                        audioOutTrack = muxer.addTrack(audioFormat);
+                        try {
+                            audioOutTrack = muxer.addTrack(audioFormat);
+                            audioExtractor.selectTrack(at);
+                        } catch (Exception unsupportedAudio) {
+                            // e.g. Opus/Vorbis/AC-3 cannot go into MP4 through MediaMuxer: keep the video only.
+                            audioOutTrack = -1;
+                        }
                     }
                 }
             }

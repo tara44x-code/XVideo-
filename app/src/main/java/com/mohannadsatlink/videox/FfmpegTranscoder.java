@@ -21,20 +21,43 @@ final class FfmpegTranscoder {
     private final Context context; private final AtomicBoolean cancelled;
     FfmpegTranscoder(Context context,AtomicBoolean cancelled){this.context=context.getApplicationContext();this.cancelled=cancelled;}
 
-    void convertContainer(Uri input,File output,String format,long durationMs,int audioBitrateKbps,int audioSampleRate,Listener listener)throws Exception{
-        String source="file".equals(input.getScheme())?input.getPath():FFmpegKitConfig.getSafParameterForRead(context,input);
-        ArrayList<String> args=new ArrayList<>();args.add("-y");args.add("-i");args.add(source);args.add("-map");args.add("0:v:0");args.add("-map");args.add("0:a?");
-        if("FFMPEG_AVI".equals(format)){args.add("-c:v");args.add("mpeg4");args.add("-q:v");args.add("4");args.add("-c:a");args.add("libmp3lame");args.add("-b:a");args.add(Math.max(64,audioBitrateKbps)+"k");args.add("-f");args.add("avi");}
-        else if("FFMPEG_MOV".equals(format)){args.add("-c:v");args.add("copy");args.add("-c:a");args.add("aac");args.add("-b:a");args.add(Math.max(64,audioBitrateKbps)+"k");args.add("-f");args.add("mov");}
-        else{args.add("-c:v");args.add("copy");args.add("-c:a");args.add("aac");args.add("-b:a");args.add(Math.max(64,audioBitrateKbps)+"k");args.add("-f");args.add("matroska");}
-        if(audioSampleRate>0){args.add("-ar");args.add(String.valueOf(audioSampleRate));}
-        args.add(output.getAbsolutePath());CountDownLatch done=new CountDownLatch(1);AtomicReference<FFmpegSession> result=new AtomicReference<>();FFmpegSession session=FFmpegKit.executeWithArgumentsAsync(args.toArray(new String[0]),s->{result.set(s);done.countDown();},null,statistics->{int p=(int)Math.min(99,statistics.getTime()*100/Math.max(1,durationMs));listener.onProgress(p);});
-        while(!done.await(300,TimeUnit.MILLISECONDS)){if(cancelled.get()){FFmpegKit.cancel(session.getSessionId());throw new InterruptedException("تم إلغاء العملية");}}
-        FFmpegSession finished=result.get();if(finished==null||!ReturnCode.isSuccess(finished.getReturnCode())){if(output.exists())output.delete();String log=finished==null?"":shortFailure(finished.getAllLogsAsString());throw new IllegalStateException("فشل محرك الصيغ"+(log.isEmpty()?"":" — "+log));}
+    /**
+     * Final step of compress/convert: takes the encoded video (no audio) and adds the ORIGINAL
+     * audio re-encoded to the requested quality, written into the requested container.
+     * Reading audio from the source avoids MediaMuxer limits (e.g. Opus audio in MP4).
+     */
+    void muxWithSourceAudio(Uri video, Uri audioSource, long startMs, long endMs, File output, String format,
+                            int audioBitrateKbps, int audioSampleRate, long durationMs, Listener listener) throws Exception {
+        ArrayList<String> args = new ArrayList<>();
+        args.add("-y");
+        args.add("-i"); args.add(source(video));
+        if (startMs > 0) { args.add("-ss"); args.add(seconds(startMs)); }
+        if (endMs > startMs) { args.add("-t"); args.add(seconds(endMs - startMs)); }
+        args.add("-i"); args.add(source(audioSource));
+        args.add("-map"); args.add("0:v:0");
+        args.add("-map"); args.add("1:a:0?");
+        String kbps = Math.max(64, audioBitrateKbps) + "k";
+        String f = format == null ? "MP4_AVC" : format;
+        if ("FFMPEG_AVI".equals(f)) {
+            args.add("-c:v"); args.add("mpeg4"); args.add("-q:v"); args.add("4");
+            args.add("-c:a"); args.add("libmp3lame"); args.add("-b:a"); args.add(kbps);
+        } else {
+            args.add("-c:v"); args.add("copy");
+            args.add("-c:a"); args.add(f.startsWith("WEBM") ? "libopus" : "aac"); args.add("-b:a"); args.add(kbps);
+        }
+        if (audioSampleRate > 0 && !f.startsWith("WEBM")) { args.add("-ar"); args.add(String.valueOf(audioSampleRate)); }
+        args.add("-shortest");
+        String container = f.startsWith("WEBM") ? "webm" : f.startsWith("3GP") ? "3gp" : "FFMPEG_MKV".equals(f) ? "matroska"
+                : "FFMPEG_MOV".equals(f) ? "mov" : "FFMPEG_AVI".equals(f) ? "avi" : "mp4";
+        if ("mp4".equals(container) || "mov".equals(container)) {
+            args.add("-movflags"); args.add("+faststart");
+            if (f.endsWith("HEVC")) { args.add("-tag:v"); args.add("hvc1"); } // plays on iPhone/Mac too
+        }
+        args.add("-f"); args.add(container);
+        args.add(output.getAbsolutePath());
+        runPass(args, Math.max(1, durationMs), listener, "فشل دمج الصوت مع الفيديو");
         listener.onProgress(100);
     }
-
-    void adjustVideoAudio(Uri input,File output,String profile,long durationMs,int bitrateKbps,int sampleRate,Listener listener)throws Exception{String source="file".equals(input.getScheme())?input.getPath():FFmpegKitConfig.getSafParameterForRead(context,input);ArrayList<String> args=new ArrayList<>();args.add("-y");args.add("-i");args.add(source);args.add("-map");args.add("0:v:0");args.add("-map");args.add("0:a?");args.add("-c:v");args.add("copy");args.add("-c:a");if(profile.startsWith("WEBM"))args.add("libopus");else args.add("aac");args.add("-b:a");args.add(Math.max(64,bitrateKbps)+"k");if(sampleRate>0){args.add("-ar");args.add(String.valueOf(sampleRate));}args.add(output.getAbsolutePath());execute(args,output,durationMs,listener);}
 
     void mergeWithFade(List<Uri> inputs,File output,long[] durationsMs,double fadeSeconds,Listener listener)throws Exception{
         ArrayList<String> args=new ArrayList<>();args.add("-y");for(Uri input:inputs){args.add("-i");args.add("file".equals(input.getScheme())?input.getPath():FFmpegKitConfig.getSafParameterForRead(context,input));}
